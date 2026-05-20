@@ -1,0 +1,62 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --li-blue: #0A66C2;
+  --li-blue-hover: #004182;
+  --li-bg: #F3F2EF;
+  --li-surface: #FFFFFF;
+  --li-border: rgba(0,0,0,0.08);
+  --li-text: #000000E0;
+  --li-text-muted: #00000099;
+  --li-success: #057642;
+  --li-error: #CC1016;
+  --li-radius: 8px;
+  --li-shadow: 0 0 0 1px var(--li-border), 0 2px 8px rgba(0,0,0,0.08);
+
+  /* host style variable fallbacks */
+  color-scheme: var(--mcp-color-scheme, light);
+  font-family: var(--mcp-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+  font-size: var(--mcp-font-size, 14px);
+}
+
+body {
+  background: var(--mcp-background-color, var(--li-bg));
+  color: var(--li-text);
+  min-height: 100vh;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+textarea, input[type="text"] {
+  font-family: inherit;
+  font-size: inherit;
+  border: 1px solid var(--li-border);
+  border-radius: var(--li-radius);
+  padding: 10px 12px;
+  width: 100%;
+  outline: none;
+  resize: vertical;
+}
+
+textarea:focus, input[type="text"]:focus {
+  border-color: var(--li-blue);
+  box-shadow: 0 0 0 2px rgba(10,102,194,0.2);
+}

@@ -1,0 +1,134 @@
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import cors from "cors";
+import type { Request, Response } from "express";
+import { exchangeCodeForToken, initializeToken, resolveOAuthCallback } from "./linkedin-api.js";
+import { createServer } from "./server.js";
+
+const PORT = parseInt(process.env.PORT ?? "3001", 10);
+const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID ?? "";
+const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET ?? "";
+
+async function startHttpServer(factory: () => McpServer): Promise<void> {
+  const app = createMcpExpressApp({ host: "0.0.0.0" });
+  app.use(cors());
+
+  // Health check — used by Railway and other platforms
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({ status: "ok", version: "1.0.0" });
+  });
+
+  // OAuth callback — LinkedIn redirects here after user approves
+  app.get("/auth/callback", async (req: Request, res: Response) => {
+    const code = req.query.code as string | undefined;
+    const state = req.query.state as string | undefined;
+    const error = req.query.error as string | undefined;
+
+    if (error) {
+      res.status(400).send(callbackPage("error", `LinkedIn denied access: ${error}`));
+      return;
+    }
+
+    if (!code || !state) {
+      res.status(400).send(callbackPage("error", "Missing code or state parameter."));
+      return;
+    }
+
+    // Validate state and notify any waiting tool call
+    const matched = resolveOAuthCallback(code, state);
+
+    try {
+      // Always exchange the code even if no tool call is waiting
+      await exchangeCodeForToken(code, CLIENT_ID, CLIENT_SECRET);
+      res.send(callbackPage("success", "You are now connected to LinkedIn. You can close this tab."));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).send(callbackPage("error", `Token exchange failed: ${message}`));
+    }
+
+    void matched; // used to notify waiting tool call via resolveOAuthCallback side-effect
+  });
+
+  // MCP endpoint — stateless per-request
+  app.all("/mcp", async (req: Request, res: Response) => {
+    const server = factory();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (err) {
+      console.error("MCP error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const httpServer = app.listen(PORT, (err?: Error) => {
+      if (err) return reject(err);
+      console.log(`LinkedIn MCP server listening on http://localhost:${PORT}/mcp`);
+      console.log(`OAuth callback endpoint: http://localhost:${PORT}/auth/callback`);
+      resolve();
+    });
+
+    const shutdown = () => {
+      httpServer.close(() => process.exit(0));
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  });
+}
+
+async function startStdioServer(factory: () => McpServer): Promise<void> {
+  await factory().connect(new StdioServerTransport());
+}
+
+function callbackPage(status: "success" | "error", message: string): string {
+  const color = status === "success" ? "#0A66C2" : "#CC1016";
+  const icon = status === "success" ? "✓" : "✗";
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>LinkedIn MCP – ${status}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0; background: #F3F2EF; }
+  .card { background: #fff; border-radius: 8px; padding: 48px; text-align: center;
+          box-shadow: 0 0 0 1px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.1); max-width: 420px; }
+  .icon { font-size: 48px; color: ${color}; }
+  h1 { color: ${color}; margin: 16px 0 8px; }
+  p { color: #666; line-height: 1.5; }
+</style></head><body>
+<div class="card">
+  <div class="icon">${icon}</div>
+  <h1>${status === "success" ? "Connected!" : "Error"}</h1>
+  <p>${message}</p>
+</div></body></html>`;
+}
+
+async function main() {
+  // Load any previously saved token on startup
+  await initializeToken();
+
+  if (process.argv.includes("--stdio")) {
+    await startStdioServer(createServer);
+  } else {
+    await startHttpServer(createServer);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
