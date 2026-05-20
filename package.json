@@ -10,6 +10,9 @@
     "serve:stdio": "tsx main.ts --stdio",
     "start": "node dist/main.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
