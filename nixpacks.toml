@@ -2,10 +2,10 @@
 nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = ["npm ci --legacy-peer-deps"]
+cmds = ["npm install --legacy-peer-deps --prefer-offline"]
 
 [phases.build]
 cmds = ["npm run build"]
 
 [start]
-cmd = "npm start"
+cmd = "node dist/main.js"
