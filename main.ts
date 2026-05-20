@@ -79,8 +79,10 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const httpServer = app.listen(PORT, (err?: Error) => {
       if (err) return reject(err);
-      console.log(`LinkedIn MCP server listening on http://localhost:${PORT}/mcp`);
-      console.log(`OAuth callback endpoint: http://localhost:${PORT}/auth/callback`);
+      const base = process.env.LINKEDIN_REDIRECT_URI?.replace("/auth/callback", "") ?? `http://localhost:${PORT}`;
+      console.log(`LinkedIn MCP server running on port ${PORT}`);
+      console.log(`MCP endpoint:      ${base}/mcp`);
+      console.log(`OAuth callback:    ${base}/auth/callback`);
       resolve();
     });
 
