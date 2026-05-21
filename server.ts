@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   createImagePost,
   createPost,
+  deletePost,
   exchangeCodeForToken,
   generateAuthUrl,
   getEmail,
@@ -20,7 +21,7 @@ import {
   setPendingOAuthResolve,
   uploadImage,
 } from "./linkedin-api.js";
-import { generatePostText, getCronConfig } from "./cron.js";
+import { generatePostText, generateRewrites, generateWeeklyPlan, getCronConfig } from "./cron.js";
 
 const DIST_DIR = import.meta.filename.endsWith(".ts")
   ? path.join(import.meta.dirname, "dist")
@@ -505,6 +506,89 @@ WORKFLOW:
           },
         ],
         structuredContent: { stage: "published", postId: result.id, imageUrl: image_url, text: caption, visibility },
+      };
+    }
+  );
+
+  // ── linkedin_delete_post ──────────────────────────────────────────────────
+  server.tool(
+    "linkedin_delete_post",
+    "Delete one of your LinkedIn posts by its ID. Ask the user to confirm before calling this.",
+    { post_id: z.string().min(1).describe("The post ID returned when the post was created") },
+    async ({ post_id }: { post_id: string }): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+      await deletePost(post_id);
+      return {
+        content: [{ type: "text", text: `Post ${post_id} deleted successfully.` }],
+      };
+    }
+  );
+
+  // ── linkedin_weekly_plan ──────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_weekly_plan",
+    {
+      title: "Generate Weekly Content Plan",
+      description:
+        "Use Gemini AI to generate 7 LinkedIn posts — one for each day of the week. Topics rotate through the provided list. Shows all drafts for review before any are published.",
+      inputSchema: {
+        topics: z
+          .string()
+          .optional()
+          .describe("Comma-separated topics (e.g. 'AI trends, productivity'). Falls back to DAILY_POST_TOPICS env var."),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({ topics }: { topics?: string }): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+      if (!process.env.GEMINI_API_KEY) {
+        return { content: [{ type: "text", text: "GEMINI_API_KEY is not set." }], isError: true };
+      }
+
+      const topicList = topics
+        ? topics.split(",").map((t) => t.trim()).filter(Boolean)
+        : getCronConfig().topics;
+
+      if (topicList.length === 0) {
+        return {
+          content: [{ type: "text", text: "No topics provided. Pass topics as argument or set DAILY_POST_TOPICS in Railway." }],
+          isError: true,
+        };
+      }
+
+      const posts = await generateWeeklyPlan(topicList);
+
+      return {
+        content: [{ type: "text", text: `Generated ${posts.length} posts for the week. Review them in the UI.` }],
+        structuredContent: { weeklyPlan: posts },
+      };
+    }
+  );
+
+  // ── linkedin_rewrite_post ─────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_rewrite_post",
+    {
+      title: "Rewrite Post in 3 Styles",
+      description:
+        "Take any LinkedIn post draft and rewrite it in 3 styles: Professional, Storytelling, and Thought Leader. Pick the one that fits best.",
+      inputSchema: {
+        text: z.string().min(1).describe("The post text to rewrite"),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({ text }: { text: string }): Promise<CallToolResult> => {
+      if (!process.env.GEMINI_API_KEY) {
+        return { content: [{ type: "text", text: "GEMINI_API_KEY is not set." }], isError: true };
+      }
+
+      const rewrites = await generateRewrites(text);
+
+      return {
+        content: [{ type: "text", text: "Here are 3 rewrites. Pick one from the UI or ask Claude to mix elements." }],
+        structuredContent: { original: text, ...rewrites },
       };
     }
   );

@@ -47,6 +47,20 @@ interface PostAdvisor {
   suggestions: string[];
 }
 
+interface WeeklyPost {
+  day: number;
+  dayName: string;
+  topic: string;
+  text: string;
+}
+
+interface Rewrites {
+  original: string;
+  professional: string;
+  storytelling: string;
+  thoughtLeader: string;
+}
+
 interface ScheduleStatus {
   enabled: boolean;
   cronExpr: string;
@@ -67,6 +81,8 @@ interface AppState {
   profileAnalysis: ProfileAnalysis | null;
   postAdvisor: PostAdvisor | null;
   scheduleStatus: ScheduleStatus | null;
+  weeklyPlan: WeeklyPost[] | null;
+  rewrites: Rewrites | null;
 }
 
 // ── Result parser ─────────────────────────────────────────────────────────────
@@ -92,6 +108,10 @@ function parseResult(result: CallToolResult): Partial<AppState> {
     return { postAdvisor: s as unknown as PostAdvisor };
   if ("enabled" in s && "cronExpr" in s)
     return { scheduleStatus: s as unknown as ScheduleStatus };
+  if ("weeklyPlan" in s && Array.isArray(s.weeklyPlan))
+    return { weeklyPlan: s.weeklyPlan as WeeklyPost[] };
+  if ("professional" in s && "storytelling" in s)
+    return { rewrites: s as unknown as Rewrites };
 
   return {};
 }
@@ -500,6 +520,109 @@ function ScheduleView({ status }: { status: ScheduleStatus }) {
   );
 }
 
+// ── WeeklyPlanView ────────────────────────────────────────────────────────────
+
+function WeeklyPlanView({ app, posts }: { app: App; posts: WeeklyPost[] }) {
+  const [busy, setBusy] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handlePost = async (post: WeeklyPost) => {
+    setBusy(post.day);
+    setErr(null);
+    try {
+      await app.callServerTool({
+        name: "linkedin_create_post",
+        arguments: { text: post.text, visibility: "PUBLIC", preview_only: true },
+      });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>Weekly Content Plan</h2>
+      <p style={S.muted}>7 AI-generated posts. Click "Review & Post" to open the draft review for any day.</p>
+      {err && <p style={S.errText}>{err}</p>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {posts.map((post) => (
+          <div key={post.day} style={{ ...S.draftBlock, gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{post.dayName}</div>
+              <span style={S.hashtagPill}>{post.topic}</span>
+            </div>
+            <p style={{ ...S.draftText, fontSize: 13, WebkitLineClamp: 3, overflow: "hidden", display: "-webkit-box", WebkitBoxOrient: "vertical" }}>
+              {post.text}
+            </p>
+            <button
+              style={{ ...S.secondaryBtn, fontSize: 12, padding: "5px 14px" }}
+              onClick={() => handlePost(post)}
+              disabled={busy !== null}
+            >
+              {busy === post.day ? "Opening…" : "Review & Post"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── RewriteView ───────────────────────────────────────────────────────────────
+
+function RewriteView({ app, rewrites }: { app: App; rewrites: Rewrites }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const versions: { key: keyof Rewrites; label: string; color: string }[] = [
+    { key: "professional", label: "Professional", color: "#1E40AF" },
+    { key: "storytelling", label: "Storytelling", color: "#065F46" },
+    { key: "thoughtLeader", label: "Thought Leader", color: "#7C3AED" },
+  ];
+
+  const handleUse = async (text: string, label: string) => {
+    setBusy(label);
+    setErr(null);
+    try {
+      await app.callServerTool({
+        name: "linkedin_create_post",
+        arguments: { text, visibility: "PUBLIC", preview_only: true },
+      });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>3 Rewrite Styles</h2>
+      <p style={S.muted}>Pick the style that fits. "Use this" opens the draft review screen.</p>
+      {err && <p style={S.errText}>{err}</p>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {versions.map(({ key, label, color }) => (
+          <div key={key} style={{ ...S.draftBlock, gap: 8 }}>
+            <div style={{ display: "inline-flex", background: `${color}18`, color, padding: "3px 10px", borderRadius: 999, fontWeight: 700, fontSize: 12, alignSelf: "flex-start" }}>
+              {label}
+            </div>
+            <p style={{ ...S.draftText, fontSize: 13 }}>{rewrites[key]}</p>
+            <button
+              style={{ ...S.primaryBtn, fontSize: 12, padding: "5px 14px", background: color }}
+              onClick={() => handleUse(rewrites[key] as string, label)}
+              disabled={busy !== null}
+            >
+              {busy === label ? "Opening…" : "Use this"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DefaultView() {
   return (
     <div style={S.card}>
@@ -523,6 +646,7 @@ function LinkedInApp() {
     tool: null, loading: false, error: null,
     connected: false, authUrl: null, profile: null, post: null,
     profileAnalysis: null, postAdvisor: null, scheduleStatus: null,
+    weeklyPlan: null, rewrites: null,
   });
 
   const { app, error: connErr } = useApp({
@@ -530,7 +654,7 @@ function LinkedInApp() {
     capabilities: {},
     onAppCreated: (app) => {
       app.ontoolinput = async (input) => {
-        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null, scheduleStatus: null }));
+        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null, scheduleStatus: null, weeklyPlan: null, rewrites: null }));
       };
       app.ontoolresult = async (result) => {
         setState((s) => ({ ...s, loading: false, ...parseResult(result) }));
@@ -559,6 +683,8 @@ function LinkedInApp() {
       {tool === "linkedin_schedule_status" && state.scheduleStatus && <ScheduleView status={state.scheduleStatus} />}
       {tool === "linkedin_post_now" && <PostView app={app} post={post} loading={loading} />}
       {tool === "linkedin_post_image" && <PostView app={app} post={post} loading={loading} />}
+      {tool === "linkedin_weekly_plan" && state.weeklyPlan && <WeeklyPlanView app={app} posts={state.weeklyPlan} />}
+      {tool === "linkedin_rewrite_post" && state.rewrites && <RewriteView app={app} rewrites={state.rewrites} />}
       {!tool && <DefaultView />}
     </div>
   );

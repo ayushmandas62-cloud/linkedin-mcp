@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import cron from "node-cron";
 import { createPost, getProfile, initializeToken, isAuthenticated } from "./linkedin-api.js";
 
@@ -22,17 +22,13 @@ export function getCronConfig(): CronConfig {
 }
 
 export async function generatePostText(topic: string): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set in environment variables.");
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not set. Get a free key at aistudio.google.com/app/apikey");
 
-  const client = new Anthropic({ apiKey });
-  const msg = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1024,
-    messages: [
-      {
-        role: "user",
-        content: `Write a LinkedIn post about: ${topic}
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `Write a LinkedIn post about: ${topic}
 
 Requirements:
 - Professional, authentic, first-person voice
@@ -41,14 +37,61 @@ Requirements:
 - End with a question or call-to-action to encourage comments
 - No markdown formatting, plain text only
 
-Return ONLY the post text, nothing else.`,
-      },
-    ],
-  });
+Return ONLY the post text, nothing else.`;
 
-  const block = msg.content[0];
-  if (block.type !== "text") throw new Error("Unexpected Claude API response");
-  return block.text.trim();
+  const result = await model.generateContent(prompt);
+  return result.response.text().trim();
+}
+
+export async function generateWeeklyPlan(
+  topics: string[]
+): Promise<{ day: number; dayName: string; topic: string; text: string }[]> {
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  return Promise.all(
+    days.map(async (dayName, i) => {
+      const topic = topics[i % topics.length];
+      const text = await generatePostText(topic);
+      return { day: i + 1, dayName, topic, text };
+    })
+  );
+}
+
+export async function generateRewrites(
+  text: string
+): Promise<{ professional: string; storytelling: string; thoughtLeader: string }> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not set. Get a free key at aistudio.google.com/app/apikey");
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `Rewrite this LinkedIn post in 3 different styles. Keep 150–300 words and add 3–5 hashtags to each.
+
+Original:
+${text}
+
+Return EXACTLY in this format, no extra text:
+===PROFESSIONAL===
+[formal, authoritative, insights-focused rewrite]
+===STORYTELLING===
+[personal narrative, emotional, first-person story rewrite]
+===THOUGHT_LEADER===
+[bold opinion, contrarian take, sparks debate rewrite]`;
+
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim();
+
+  const extract = (marker: string, next: string) => {
+    const start = raw.indexOf(`===${marker}===`) + `===${marker}===`.length;
+    const end = next ? raw.indexOf(`===${next}===`) : raw.length;
+    return raw.slice(start, end).trim();
+  };
+
+  return {
+    professional: extract("PROFESSIONAL", "STORYTELLING"),
+    storytelling: extract("STORYTELLING", "THOUGHT_LEADER"),
+    thoughtLeader: extract("THOUGHT_LEADER", ""),
+  };
 }
 
 export function startCronJob(): void {
@@ -58,7 +101,7 @@ export function startCronJob(): void {
     console.log("[cron] Daily posting disabled — set DAILY_POST_ENABLED=true to enable");
     return;
   }
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     console.warn("[cron] DAILY_POST_ENABLED=true but ANTHROPIC_API_KEY not set — skipping");
     return;
   }

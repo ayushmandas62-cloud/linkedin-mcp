@@ -276,6 +276,29 @@ export async function createImagePost(
   return { id };
 }
 
+export async function deletePost(postId: string): Promise<void> {
+  if (!tokenData) throw new Error("Not authenticated with LinkedIn");
+  const urn = postId.startsWith("urn:") ? postId : `urn:li:ugcPost:${postId}`;
+  const response = await fetch(
+    `https://api.linkedin.com/v2/ugcPosts/${encodeURIComponent(urn)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+        "X-Restli-Protocol-Version": "2.0.0",
+      },
+    }
+  );
+  if (response.status === 401) {
+    tokenData = null;
+    throw new Error("LinkedIn session expired. Please reconnect using linkedin_connect.");
+  }
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text();
+    throw new Error(`Delete failed: ${text}`);
+  }
+}
+
 export async function createPost(
   authorId: string,
   text: string,
