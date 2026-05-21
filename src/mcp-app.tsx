@@ -437,7 +437,7 @@ function ScheduleView({ status }: { status: ScheduleStatus }) {
 
   const checks = [
     { label: "Daily posting enabled", ok: status.enabled, fix: "Set DAILY_POST_ENABLED=true in Railway" },
-    { label: "Claude API key set", ok: status.hasAnthropicKey, fix: "Set ANTHROPIC_API_KEY in Railway" },
+    { label: "Gemini API key set", ok: status.hasAnthropicKey, fix: "Set GEMINI_API_KEY in Railway" },
     { label: "LinkedIn connected", ok: status.authenticated, fix: "Say 'connect to LinkedIn'" },
     { label: "Topics configured", ok: status.topics.length > 0, fix: "Set DAILY_POST_TOPICS in Railway" },
   ];

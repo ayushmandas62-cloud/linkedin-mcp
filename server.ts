@@ -360,7 +360,7 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
     },
     async (): Promise<CallToolResult> => {
       const config = getCronConfig();
-      const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
+      const hasAnthropicKey = !!process.env.GEMINI_API_KEY;
 
       return {
         content: [
@@ -371,13 +371,13 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
               `Schedule: ${config.cronExpr} (UTC)`,
               `Topics: ${config.topics.length ? config.topics.join(", ") : "none set"}`,
               `Visibility: ${config.visibility}`,
-              `Claude API key: ${hasAnthropicKey ? "✅ set" : "❌ missing"}`,
+              `Gemini API key: ${hasAnthropicKey ? "✅ set" : "❌ missing (free at aistudio.google.com)"}`,
               `LinkedIn auth: ${isAuthenticated() ? "✅ connected" : "❌ not connected"}`,
               !config.enabled
                 ? "\nTo enable: set DAILY_POST_ENABLED=true in Railway Variables"
                 : "",
               !hasAnthropicKey
-                ? "To generate posts: set ANTHROPIC_API_KEY in Railway Variables"
+                ? "To generate posts: set GEMINI_API_KEY in Railway Variables"
                 : "",
             ]
               .filter(Boolean)
@@ -407,12 +407,12 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
     },
     async ({ topic }: { topic: string }): Promise<CallToolResult> => {
       if (!isAuthenticated()) return notConnectedResult();
-      if (!process.env.ANTHROPIC_API_KEY) {
+      if (!process.env.GEMINI_API_KEY) {
         return {
           content: [
             {
               type: "text",
-              text: "ANTHROPIC_API_KEY is not set. Add it in Railway Variables to enable AI post generation.",
+              text: "GEMINI_API_KEY is not set. Add it in Railway Variables to enable AI post generation.",
             },
           ],
           isError: true,
