@@ -7,7 +7,7 @@ export const REDIRECT_URI =
   process.env.LINKEDIN_REDIRECT_URI ??
   (process.env.RAILWAY_PUBLIC_DOMAIN
     ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/auth/callback`
-    : "http://localhost:3001/auth/callback");
+    : "https://linkedin-mcp-production-3d70.up.railway.app/auth/callback");
 const TOKEN_FILE = path.join(os.homedir(), ".linkedin-mcp-token.json");
 
 export interface TokenData {
