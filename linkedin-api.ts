@@ -56,7 +56,7 @@ export function generateAuthUrl(clientId: string): string {
     client_id: clientId,
     redirect_uri: REDIRECT_URI,
     state: oauthState,
-    scope: "r_liteprofile r_emailaddress w_member_social",
+    scope: "openid profile email w_member_social",
   });
   return `https://www.linkedin.com/oauth/v2/authorization?${params}`;
 }
@@ -112,6 +112,7 @@ export async function exchangeCodeForToken(
 
 export async function revokeToken(): Promise<void> {
   tokenData = null;
+  cachedUserInfo = null;
   try {
     await fs.unlink(TOKEN_FILE);
   } catch {}
@@ -158,48 +159,30 @@ async function apiPost(url: string, body: object): Promise<unknown> {
   return response.json();
 }
 
-function extractLocale(obj: unknown): string {
-  if (!obj || typeof obj !== "object") return "";
-  const localized = (obj as Record<string, unknown>).localized;
-  if (!localized || typeof localized !== "object") return "";
-  const keys = Object.keys(localized as object);
-  if (keys.length === 0) return "";
-  return String((localized as Record<string, unknown>)[keys[0]] ?? "");
+// Cached userinfo to avoid duplicate calls within the same request
+let cachedUserInfo: Record<string, unknown> | null = null;
+
+async function getUserInfo(): Promise<Record<string, unknown>> {
+  if (cachedUserInfo) return cachedUserInfo;
+  const data = (await apiGet("https://api.linkedin.com/v2/userinfo")) as Record<string, unknown>;
+  cachedUserInfo = data;
+  return data;
 }
 
 export async function getProfile(): Promise<LinkedInProfile> {
-  const data = (await apiGet(
-    "https://api.linkedin.com/v2/me?projection=(id,firstName,lastName,headline,profilePicture(displayImage~:playableStreams))"
-  )) as Record<string, unknown>;
-
-  let profilePicture: string | undefined;
-  try {
-    const pic = data.profilePicture as Record<string, unknown> | undefined;
-    const display = pic?.["displayImage~"] as Record<string, unknown> | undefined;
-    const elements = display?.elements as Array<Record<string, unknown>> | undefined;
-    if (elements && elements.length > 0) {
-      const last = elements[elements.length - 1];
-      const identifiers = last?.identifiers as Array<Record<string, unknown>> | undefined;
-      profilePicture = String(identifiers?.[0]?.identifier ?? "");
-    }
-  } catch {}
-
+  const data = await getUserInfo();
   return {
-    id: String(data.id ?? ""),
-    firstName: extractLocale(data.firstName),
-    lastName: extractLocale(data.lastName),
-    headline: extractLocale(data.headline),
-    profilePicture: profilePicture || undefined,
+    id: String(data.sub ?? ""),
+    firstName: String(data.given_name ?? ""),
+    lastName: String(data.family_name ?? ""),
+    headline: String(data.headline ?? ""),
+    profilePicture: data.picture as string | undefined,
   };
 }
 
 export async function getEmail(): Promise<string> {
-  const data = (await apiGet(
-    "https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))"
-  )) as Record<string, unknown>;
-  const elements = data.elements as Array<Record<string, unknown>> | undefined;
-  const handle = elements?.[0]?.["handle~"] as Record<string, unknown> | undefined;
-  return String(handle?.emailAddress ?? "");
+  const data = await getUserInfo();
+  return String(data.email ?? "");
 }
 
 export async function createPost(
