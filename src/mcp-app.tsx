@@ -25,6 +25,27 @@ interface PostData {
   postId?: string;
 }
 
+interface ProfileAnalysis {
+  profile: Profile;
+  email: string;
+  fields: Record<string, boolean>;
+  score: number;
+  missing: string[];
+}
+
+interface PostAdvisor {
+  score: number;
+  charCount: number;
+  wordCount: number;
+  readTimeSec: number;
+  paragraphs: number;
+  hashtags: string[];
+  mentions: string[];
+  hasQuestion: boolean;
+  hasCallToAction: boolean;
+  suggestions: string[];
+}
+
 interface AppState {
   tool: string | null;
   loading: boolean;
@@ -33,6 +54,8 @@ interface AppState {
   authUrl: string | null;
   profile: Profile | null;
   post: PostData | null;
+  profileAnalysis: ProfileAnalysis | null;
+  postAdvisor: PostAdvisor | null;
 }
 
 // ── Result parser ─────────────────────────────────────────────────────────────
@@ -52,6 +75,10 @@ function parseResult(result: CallToolResult): Partial<AppState> {
     return { connected: true, profile: s as unknown as Profile };
   if (s.stage === "draft" || s.stage === "published")
     return { post: s as unknown as PostData };
+  if (s.score !== undefined && s.fields !== undefined)
+    return { profileAnalysis: s as unknown as ProfileAnalysis };
+  if (s.score !== undefined && s.charCount !== undefined)
+    return { postAdvisor: s as unknown as PostAdvisor };
 
   return {};
 }
@@ -297,6 +324,100 @@ function ProfileCard({ profile }: { profile: Profile }) {
 
 // ── DefaultView ───────────────────────────────────────────────────────────────
 
+// ── ProfileAnalysisView ───────────────────────────────────────────────────────
+
+function ProfileAnalysisView({ analysis }: { analysis: ProfileAnalysis }) {
+  const { profile, email, fields, score, missing } = analysis;
+  const color = score >= 80 ? "var(--li-success)" : score >= 50 ? "#D97706" : "var(--li-error)";
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>Profile Analysis</h2>
+
+      {/* Score ring */}
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div style={{ ...S.scoreRing, borderColor: color }}>
+          <span style={{ fontSize: 22, fontWeight: 700, color }}>{score}%</span>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Profile Completeness</div>
+          <div style={S.muted}>{missing.length === 0 ? "All key fields set!" : `Missing: ${missing.join(", ")}`}</div>
+        </div>
+      </div>
+
+      {/* Field checklist */}
+      <div style={S.checklist}>
+        {Object.entries(fields).map(([field, ok]) => (
+          <div key={field} style={S.checkRow}>
+            <span style={{ color: ok ? "var(--li-success)" : "var(--li-error)", fontWeight: 700 }}>
+              {ok ? "✓" : "✗"}
+            </span>
+            <span style={{ textTransform: "capitalize" }}>{field}</span>
+            {field === "email" && email && <span style={S.muted}>{email}</span>}
+            {field === "headline" && profile.headline && <span style={S.muted}>{profile.headline}</span>}
+          </div>
+        ))}
+      </div>
+
+      {missing.length > 0 && (
+        <div style={S.infoBox}>
+          <strong>💡 Ask Claude:</strong> "Help me write an optimized LinkedIn {missing[0]} for a {profile.headline || "professional"}"
+        </div>
+      )}
+
+      <ProfileCard profile={{ ...profile, email }} />
+    </div>
+  );
+}
+
+// ── PostAdvisorView ───────────────────────────────────────────────────────────
+
+function PostAdvisorView({ advisor }: { advisor: PostAdvisor }) {
+  const { score, charCount, wordCount, readTimeSec, hashtags, suggestions, hasQuestion, hasCallToAction } = advisor;
+  const scoreColor = score >= 80 ? "var(--li-success)" : score >= 50 ? "#D97706" : "var(--li-error)";
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>Post Advisor</h2>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div style={{ ...S.scoreRing, borderColor: scoreColor }}>
+          <span style={{ fontSize: 22, fontWeight: 700, color: scoreColor }}>{score}</span>
+          <span style={{ fontSize: 11, color: "var(--li-text-muted)" }}>/100</span>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Engagement Score</div>
+          <div style={S.muted}>{score >= 80 ? "Well optimized!" : score >= 50 ? "Good, room to improve" : "Needs work"}</div>
+        </div>
+      </div>
+
+      <div style={S.metricsGrid}>
+        <div style={S.metric}><div style={S.metricVal}>{charCount}<span style={S.metricSub}>/3000</span></div><div style={S.metricLabel}>Characters</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{wordCount}</div><div style={S.metricLabel}>Words</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{readTimeSec}s</div><div style={S.metricLabel}>Read time</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{hashtags.length}</div><div style={S.metricLabel}>Hashtags</div></div>
+        <div style={S.metric}><div style={{ ...S.metricVal, color: hasQuestion || hasCallToAction ? "var(--li-success)" : "var(--li-error)" }}>{hasQuestion || hasCallToAction ? "✓" : "✗"}</div><div style={S.metricLabel}>Has CTA</div></div>
+      </div>
+
+      {hashtags.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {hashtags.map((h) => (
+            <span key={h} style={S.hashtagPill}>{h}</span>
+          ))}
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div style={S.suggestionBox}>
+          {suggestions.map((s, i) => (
+            <div key={i} style={S.suggestion}>• {s}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DefaultView() {
   return (
     <div style={S.card}>
@@ -316,6 +437,7 @@ function LinkedInApp() {
   const [state, setState] = useState<AppState>({
     tool: null, loading: false, error: null,
     connected: false, authUrl: null, profile: null, post: null,
+    profileAnalysis: null, postAdvisor: null,
   });
 
   const { app, error: connErr } = useApp({
@@ -323,7 +445,7 @@ function LinkedInApp() {
     capabilities: {},
     onAppCreated: (app) => {
       app.ontoolinput = async (input) => {
-        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null }));
+        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null }));
       };
       app.ontoolresult = async (result) => {
         setState((s) => ({ ...s, loading: false, ...parseResult(result) }));
@@ -347,6 +469,8 @@ function LinkedInApp() {
       {tool === "linkedin_connect" && <ConnectView app={app} state={state} />}
       {tool === "linkedin_profile" && state.profile && <ProfileView profile={state.profile} />}
       {tool === "linkedin_create_post" && <PostView app={app} post={post} loading={loading} />}
+      {tool === "linkedin_analyze_profile" && state.profileAnalysis && <ProfileAnalysisView analysis={state.profileAnalysis} />}
+      {tool === "linkedin_post_advisor" && state.postAdvisor && <PostAdvisorView advisor={state.postAdvisor} />}
       {!tool && <DefaultView />}
     </div>
   );
@@ -382,6 +506,18 @@ const S: Record<string, React.CSSProperties> = {
   avatarFallback: { width: 56, height: 56, borderRadius: "50%", background: "var(--li-blue)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 18, flexShrink: 0 },
   profileName: { fontWeight: 700, fontSize: 16 },
   urlCode: { display: "block", marginTop: 8, wordBreak: "break-all", fontSize: 11, background: "#F3F2EF", padding: 8, borderRadius: 4 },
+  scoreRing: { width: 72, height: 72, borderRadius: "50%", border: "4px solid", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  checklist: { display: "flex", flexDirection: "column", gap: 8 },
+  checkRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14 },
+  infoBox: { background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: "var(--li-radius)", padding: "10px 14px", fontSize: 13, color: "#1E40AF" },
+  metricsGrid: { display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8 },
+  metric: { background: "#F9FAFB", borderRadius: "var(--li-radius)", padding: "10px 6px", textAlign: "center" },
+  metricVal: { fontSize: 18, fontWeight: 700, color: "var(--li-text)" },
+  metricSub: { fontSize: 11, fontWeight: 400, color: "var(--li-text-muted)" },
+  metricLabel: { fontSize: 11, color: "var(--li-text-muted)", marginTop: 2 },
+  hashtagPill: { background: "#EFF6FF", color: "var(--li-blue)", padding: "3px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600 },
+  suggestionBox: { background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: "var(--li-radius)", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
+  suggestion: { fontSize: 13, color: "#92400E" },
 };
 
 createRoot(document.getElementById("root")!).render(

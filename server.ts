@@ -222,6 +222,130 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
     }
   );
 
+  // ── linkedin_analyze_profile ──────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_analyze_profile",
+    {
+      title: "Analyze LinkedIn Profile",
+      description:
+        "Fetch and score your LinkedIn profile completeness. Returns structured data so Claude can provide specific improvement recommendations for your headline, photo, and other fields.",
+      inputSchema: {},
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async (): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+
+      const [profile, email] = await Promise.all([getProfile(), getEmail()]);
+
+      const fields = {
+        name: !!(profile.firstName && profile.lastName),
+        headline: !!profile.headline,
+        photo: !!profile.profilePicture,
+        email: !!email,
+      };
+
+      const score = Math.round(
+        (Object.values(fields).filter(Boolean).length / Object.keys(fields).length) * 100
+      );
+      const missing = Object.entries(fields)
+        .filter(([, v]) => !v)
+        .map(([k]) => k);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Profile Completeness: ${score}%`,
+              `Name: ${profile.firstName} ${profile.lastName}`,
+              `Headline: ${profile.headline || "missing"}`,
+              `Photo: ${profile.profilePicture ? "set" : "missing"}`,
+              `Email: ${email || "missing"}`,
+              missing.length ? `\nMissing: ${missing.join(", ")}` : "\nAll key fields complete!",
+            ].join("\n"),
+          },
+        ],
+        structuredContent: { profile, email, fields, score, missing },
+      };
+    }
+  );
+
+  // ── linkedin_post_advisor ─────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_post_advisor",
+    {
+      title: "LinkedIn Post Advisor",
+      description:
+        "Analyze a post draft before publishing. Returns character count, hashtag count, readability metrics, and engagement suggestions. Call this before linkedin_create_post to optimize the text.",
+      inputSchema: {
+        text: z.string().min(1).describe("The post draft to analyze"),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({ text }: { text: string }): Promise<CallToolResult> => {
+      const charCount = text.length;
+      const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+      const paragraphs = text.split(/\n\s*\n/).filter(Boolean).length;
+      const hashtags = (text.match(/#\w+/g) ?? []);
+      const mentions = (text.match(/@\w+/g) ?? []);
+      const hasQuestion = text.includes("?");
+      const hasCallToAction = /comment|share|thoughts|think|let me know|drop|agree|disagree/i.test(text);
+      const readTimeSec = Math.ceil(wordCount / 4);
+
+      const suggestions: string[] = [];
+      if (charCount < 150) suggestions.push("Too short — add more context or a story to boost engagement.");
+      if (charCount > 2500) suggestions.push("Very long — consider trimming or splitting into a series.");
+      if (hashtags.length === 0) suggestions.push("Add 3–5 relevant hashtags to increase reach.");
+      if (hashtags.length > 8) suggestions.push("Too many hashtags (8+) looks spammy — keep it to 3–5.");
+      if (paragraphs < 2) suggestions.push("Break into shorter paragraphs for easier mobile reading.");
+      if (!hasQuestion && !hasCallToAction) suggestions.push("Add a question or call-to-action to encourage comments.");
+
+      const score = Math.max(
+        0,
+        100 -
+          (charCount < 150 ? 20 : 0) -
+          (charCount > 2500 ? 15 : 0) -
+          (hashtags.length === 0 ? 20 : hashtags.length > 8 ? 10 : 0) -
+          (paragraphs < 2 ? 15 : 0) -
+          (!hasQuestion && !hasCallToAction ? 15 : 0)
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Post Advisor Score: ${score}/100`,
+              `Characters: ${charCount}/3000`,
+              `Words: ${wordCount} (~${readTimeSec}s read)`,
+              `Hashtags: ${hashtags.length} ${hashtags.length ? `(${hashtags.join(" ")})` : ""}`,
+              `Mentions: ${mentions.length}`,
+              `Paragraphs: ${paragraphs}`,
+              `Has CTA/question: ${hasQuestion || hasCallToAction ? "yes" : "no"}`,
+              suggestions.length
+                ? `\nSuggestions:\n${suggestions.map((s) => `• ${s}`).join("\n")}`
+                : "\n✅ Post looks well-optimized!",
+            ].join("\n"),
+          },
+        ],
+        structuredContent: {
+          score,
+          charCount,
+          wordCount,
+          readTimeSec,
+          paragraphs,
+          hashtags,
+          mentions,
+          hasQuestion,
+          hasCallToAction,
+          suggestions,
+        },
+      };
+    }
+  );
+
   // ── linkedin_disconnect ───────────────────────────────────────────────────
   server.tool(
     "linkedin_disconnect",
