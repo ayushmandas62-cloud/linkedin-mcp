@@ -23,6 +23,7 @@ interface PostData {
   text: string;
   visibility: string;
   postId?: string;
+  imageUrl?: string;
 }
 
 interface ProfileAnalysis {
@@ -170,16 +171,17 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
 
   // ── Draft review screen (Claude's draft ready for approval) ───────────────
   if (localPost?.stage === "draft") {
-    const { text, visibility } = localPost;
+    const { text, visibility, imageUrl } = localPost;
 
     const handlePublish = async () => {
       setBusy(true);
       setErr(null);
       try {
-        const res = await app.callServerTool({
-          name: "linkedin_create_post",
-          arguments: { text, visibility, preview_only: false },
-        });
+        const res = await app.callServerTool(
+          imageUrl
+            ? { name: "linkedin_post_image", arguments: { image_url: imageUrl, caption: text, visibility, preview_only: false } }
+            : { name: "linkedin_create_post", arguments: { text, visibility, preview_only: false } }
+        );
         const patch = parseResult(res);
         if (patch.post) setLocalPost(patch.post);
         else if (patch.error) setErr(patch.error);
@@ -196,7 +198,7 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
         content: [
           {
             type: "text",
-            text: `Please revise this LinkedIn draft before I publish it:\n\n---\n${text}\n---\n\nWhat changes would you suggest?`,
+            text: `Please revise this LinkedIn ${imageUrl ? "image post caption" : "draft"} before I publish it:\n\n---\n${text}\n---\n\nWhat changes would you suggest?`,
           },
         ],
       });
@@ -206,9 +208,19 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
       <div style={S.card}>
         <div style={S.draftBadge}>Draft – ready to review</div>
 
+        {imageUrl && (
+          <img
+            src={imageUrl}
+            alt="Post image"
+            style={{ width: "100%", borderRadius: "var(--li-radius)", objectFit: "cover", maxHeight: 280 }}
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+        )}
+
         <div style={S.draftBlock}>
           <div style={S.draftLabel}>
             {visibility === "PUBLIC" ? "🌐 Public post" : "🔒 Connections only"}
+            {imageUrl && " · 🖼 Image"}
           </div>
           <p style={S.draftText}>{text}</p>
           <div style={S.charCount}>{text.length} / 3 000 characters</div>
@@ -223,11 +235,7 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
           <button style={S.secondaryBtn} onClick={handleRequestEdits} disabled={busy}>
             Ask Claude to revise ✎
           </button>
-          <button
-            style={S.ghostBtn}
-            onClick={() => setLocalPost(null)}
-            disabled={busy}
-          >
+          <button style={S.ghostBtn} onClick={() => setLocalPost(null)} disabled={busy}>
             Edit manually
           </button>
         </div>
@@ -499,7 +507,10 @@ function DefaultView() {
       <h2 style={S.heading}>LinkedIn MCP</h2>
       <p style={S.muted}>
         Available tools: <code>linkedin_connect</code> · <code>linkedin_profile</code> ·{" "}
-        <code>linkedin_create_post</code> · <code>linkedin_disconnect</code>
+        <code>linkedin_create_post</code> · <code>linkedin_post_image</code> ·{" "}
+        <code>linkedin_post_advisor</code> · <code>linkedin_analyze_profile</code> ·{" "}
+        <code>linkedin_post_now</code> · <code>linkedin_schedule_status</code> ·{" "}
+        <code>linkedin_disconnect</code>
       </p>
     </div>
   );
@@ -547,6 +558,7 @@ function LinkedInApp() {
       {tool === "linkedin_post_advisor" && state.postAdvisor && <PostAdvisorView advisor={state.postAdvisor} />}
       {tool === "linkedin_schedule_status" && state.scheduleStatus && <ScheduleView status={state.scheduleStatus} />}
       {tool === "linkedin_post_now" && <PostView app={app} post={post} loading={loading} />}
+      {tool === "linkedin_post_image" && <PostView app={app} post={post} loading={loading} />}
       {!tool && <DefaultView />}
     </div>
   );

@@ -9,6 +9,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
+  createImagePost,
   createPost,
   exchangeCodeForToken,
   generateAuthUrl,
@@ -17,6 +18,7 @@ import {
   isAuthenticated,
   revokeToken,
   setPendingOAuthResolve,
+  uploadImage,
 } from "./linkedin-api.js";
 import { generatePostText, getCronConfig } from "./cron.js";
 
@@ -429,6 +431,80 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
           },
         ],
         structuredContent: { stage: "draft", text, visibility: "PUBLIC", generatedTopic: topic },
+      };
+    }
+  );
+
+  // ── linkedin_post_image ───────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_post_image",
+    {
+      title: "Post Image to LinkedIn",
+      description: `Post an image with a caption to LinkedIn.
+
+WORKFLOW:
+1. Before calling this tool, suggest 3 caption options to the user in chat so they can pick one or ask for edits.
+2. Call with preview_only: true to show the draft review card.
+3. Wait — UI will call again with preview_only: false when user clicks Publish.`,
+      inputSchema: {
+        image_url: z
+          .string()
+          .url()
+          .describe("Publicly accessible URL of the image (Google Photos share link, Imgur, etc.)"),
+        caption: z
+          .string()
+          .min(1)
+          .max(3000)
+          .describe("Caption text for the post"),
+        visibility: z
+          .enum(["PUBLIC", "CONNECTIONS"])
+          .default("PUBLIC")
+          .describe("Who can see the post"),
+        preview_only: z
+          .boolean()
+          .default(true)
+          .describe("true = show draft for review. false = publish (set by UI when user clicks Publish)."),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({
+      image_url,
+      caption,
+      visibility = "PUBLIC",
+      preview_only = true,
+    }: {
+      image_url: string;
+      caption: string;
+      visibility?: "PUBLIC" | "CONNECTIONS";
+      preview_only?: boolean;
+    }): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+
+      if (preview_only) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Image post draft ready for review.\n\nCaption: ${caption}\nVisibility: ${visibility}\nImage: ${image_url}`,
+            },
+          ],
+          structuredContent: { stage: "draft", imageUrl: image_url, text: caption, visibility },
+        };
+      }
+
+      const profile = await getProfile();
+      const imageUrn = await uploadImage(image_url, profile.id);
+      const result = await createImagePost(profile.id, caption, imageUrn, visibility);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Image post published! ID: ${result.id}\n\n${caption.slice(0, 200)}${caption.length > 200 ? "…" : ""}`,
+          },
+        ],
+        structuredContent: { stage: "published", postId: result.id, imageUrl: image_url, text: caption, visibility },
       };
     }
   );

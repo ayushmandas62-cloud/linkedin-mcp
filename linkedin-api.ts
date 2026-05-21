@@ -185,6 +185,97 @@ export async function getEmail(): Promise<string> {
   return String(data.email ?? "");
 }
 
+async function restPost(
+  path: string,
+  body: object,
+  queryParams?: Record<string, string>
+): Promise<{ headers: Headers; json: unknown }> {
+  if (!tokenData) throw new Error("Not authenticated with LinkedIn");
+  const url = new URL(`https://api.linkedin.com${path}`);
+  if (queryParams) Object.entries(queryParams).forEach(([k, v]) => url.searchParams.set(k, v));
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${tokenData.access_token}`,
+      "Content-Type": "application/json",
+      "LinkedIn-Version": "202312",
+    },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    tokenData = null;
+    throw new Error("LinkedIn session expired. Please reconnect using linkedin_connect.");
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`LinkedIn API ${response.status}: ${text}`);
+  }
+  const json = response.headers.get("content-type")?.includes("application/json")
+    ? await response.json()
+    : null;
+  return { headers: response.headers, json };
+}
+
+export async function uploadImage(imageUrl: string, ownerId: string): Promise<string> {
+  // Step 1: Initialize upload
+  const { json: initJson } = await restPost(
+    "/rest/images",
+    { initializeUploadRequest: { owner: `urn:li:person:${ownerId}` } },
+    { action: "initializeUpload" }
+  );
+  const { uploadUrl, image: imageUrn } = (initJson as { value: { uploadUrl: string; image: string } }).value;
+
+  // Step 2: Fetch image bytes from URL
+  const imgResponse = await fetch(imageUrl);
+  if (!imgResponse.ok) throw new Error(`Could not fetch image from URL (${imgResponse.status})`);
+  const imgBytes = await imgResponse.arrayBuffer();
+  const contentType = imgResponse.headers.get("content-type") ?? "image/jpeg";
+
+  // Step 3: Upload binary to LinkedIn's presigned URL
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${tokenData!.access_token}`,
+      "Content-Type": contentType,
+    },
+    body: imgBytes,
+  });
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text();
+    throw new Error(`Image upload failed: ${text}`);
+  }
+
+  return imageUrn;
+}
+
+export async function createImagePost(
+  authorId: string,
+  caption: string,
+  imageUrn: string,
+  visibility: "PUBLIC" | "CONNECTIONS" = "PUBLIC"
+): Promise<{ id: string }> {
+  const { headers } = await restPost("/rest/posts", {
+    author: `urn:li:person:${authorId}`,
+    commentary: caption,
+    visibility,
+    distribution: {
+      feedDistribution: "MAIN_FEED",
+      targetEntities: [],
+      thirdPartyDistributionChannels: [],
+    },
+    content: {
+      media: {
+        altText: caption.slice(0, 200),
+        id: imageUrn,
+      },
+    },
+    lifecycleState: "PUBLISHED",
+    isReshareDisabledByAuthor: false,
+  });
+  const id = headers.get("x-restli-id") ?? headers.get("location") ?? "unknown";
+  return { id };
+}
+
 export async function createPost(
   authorId: string,
   text: string,
