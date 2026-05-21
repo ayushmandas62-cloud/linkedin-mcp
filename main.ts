@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import cors from "cors";
 import type { Request, Response } from "express";
 import { exchangeCodeForToken, initializeToken, REDIRECT_URI, resolveOAuthCallback } from "./linkedin-api.js";
+import { startCronJob } from "./cron.js";
 import { createServer } from "./server.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
@@ -131,6 +132,9 @@ function callbackPage(status: "success" | "error", message: string): string {
 async function main() {
   // Load any previously saved token on startup
   await initializeToken();
+
+  // Start the daily auto-post cron job
+  startCronJob();
 
   if (process.argv.includes("--stdio")) {
     await startStdioServer(createServer);

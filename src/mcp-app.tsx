@@ -46,6 +46,15 @@ interface PostAdvisor {
   suggestions: string[];
 }
 
+interface ScheduleStatus {
+  enabled: boolean;
+  cronExpr: string;
+  topics: string[];
+  visibility: string;
+  hasAnthropicKey: boolean;
+  authenticated: boolean;
+}
+
 interface AppState {
   tool: string | null;
   loading: boolean;
@@ -56,6 +65,7 @@ interface AppState {
   post: PostData | null;
   profileAnalysis: ProfileAnalysis | null;
   postAdvisor: PostAdvisor | null;
+  scheduleStatus: ScheduleStatus | null;
 }
 
 // ── Result parser ─────────────────────────────────────────────────────────────
@@ -79,6 +89,8 @@ function parseResult(result: CallToolResult): Partial<AppState> {
     return { profileAnalysis: s as unknown as ProfileAnalysis };
   if (s.score !== undefined && s.charCount !== undefined)
     return { postAdvisor: s as unknown as PostAdvisor };
+  if ("enabled" in s && "cronExpr" in s)
+    return { scheduleStatus: s as unknown as ScheduleStatus };
 
   return {};
 }
@@ -418,6 +430,68 @@ function PostAdvisorView({ advisor }: { advisor: PostAdvisor }) {
   );
 }
 
+// ── ScheduleView ──────────────────────────────────────────────────────────────
+
+function ScheduleView({ status }: { status: ScheduleStatus }) {
+  const allGood = status.enabled && status.hasAnthropicKey && status.authenticated && status.topics.length > 0;
+
+  const checks = [
+    { label: "Daily posting enabled", ok: status.enabled, fix: "Set DAILY_POST_ENABLED=true in Railway" },
+    { label: "Claude API key set", ok: status.hasAnthropicKey, fix: "Set ANTHROPIC_API_KEY in Railway" },
+    { label: "LinkedIn connected", ok: status.authenticated, fix: "Say 'connect to LinkedIn'" },
+    { label: "Topics configured", ok: status.topics.length > 0, fix: "Set DAILY_POST_TOPICS in Railway" },
+  ];
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>Daily Auto-Post</h2>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ ...S.statusDot, background: allGood ? "var(--li-success)" : "#D97706" }} />
+        <span style={{ fontWeight: 600 }}>{allGood ? "Active" : "Needs configuration"}</span>
+      </div>
+
+      <div style={S.checklist}>
+        {checks.map(({ label, ok, fix }) => (
+          <div key={label} style={S.checkRow}>
+            <span style={{ color: ok ? "var(--li-success)" : "var(--li-error)", fontWeight: 700, fontSize: 16 }}>
+              {ok ? "✓" : "✗"}
+            </span>
+            <div>
+              <div style={{ fontSize: 14 }}>{label}</div>
+              {!ok && <div style={{ fontSize: 12, color: "var(--li-text-muted)" }}>{fix}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {status.cronExpr && (
+        <div style={S.infoBox}>
+          <strong>Schedule:</strong> <code>{status.cronExpr}</code> UTC<br />
+          <strong>Visibility:</strong> {status.visibility}
+        </div>
+      )}
+
+      {status.topics.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--li-text-muted)", marginBottom: 6 }}>TOPIC POOL</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {status.topics.map((t) => (
+              <span key={t} style={S.hashtagPill}>{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!allGood && (
+        <div style={S.suggestionBox}>
+          <div style={S.suggestion}>Add these in Railway → Variables tab, then redeploy.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DefaultView() {
   return (
     <div style={S.card}>
@@ -437,7 +511,7 @@ function LinkedInApp() {
   const [state, setState] = useState<AppState>({
     tool: null, loading: false, error: null,
     connected: false, authUrl: null, profile: null, post: null,
-    profileAnalysis: null, postAdvisor: null,
+    profileAnalysis: null, postAdvisor: null, scheduleStatus: null,
   });
 
   const { app, error: connErr } = useApp({
@@ -445,7 +519,7 @@ function LinkedInApp() {
     capabilities: {},
     onAppCreated: (app) => {
       app.ontoolinput = async (input) => {
-        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null }));
+        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null, scheduleStatus: null }));
       };
       app.ontoolresult = async (result) => {
         setState((s) => ({ ...s, loading: false, ...parseResult(result) }));
@@ -471,6 +545,8 @@ function LinkedInApp() {
       {tool === "linkedin_create_post" && <PostView app={app} post={post} loading={loading} />}
       {tool === "linkedin_analyze_profile" && state.profileAnalysis && <ProfileAnalysisView analysis={state.profileAnalysis} />}
       {tool === "linkedin_post_advisor" && state.postAdvisor && <PostAdvisorView advisor={state.postAdvisor} />}
+      {tool === "linkedin_schedule_status" && state.scheduleStatus && <ScheduleView status={state.scheduleStatus} />}
+      {tool === "linkedin_post_now" && <PostView app={app} post={post} loading={loading} />}
       {!tool && <DefaultView />}
     </div>
   );
@@ -518,6 +594,7 @@ const S: Record<string, React.CSSProperties> = {
   hashtagPill: { background: "#EFF6FF", color: "var(--li-blue)", padding: "3px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600 },
   suggestionBox: { background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: "var(--li-radius)", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
   suggestion: { fontSize: 13, color: "#92400E" },
+  statusDot: { width: 12, height: 12, borderRadius: "50%", flexShrink: 0 },
 };
 
 createRoot(document.getElementById("root")!).render(

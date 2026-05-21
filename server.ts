@@ -18,6 +18,7 @@ import {
   revokeToken,
   setPendingOAuthResolve,
 } from "./linkedin-api.js";
+import { generatePostText, getCronConfig } from "./cron.js";
 
 const DIST_DIR = import.meta.filename.endsWith(".ts")
   ? path.join(import.meta.dirname, "dist")
@@ -342,6 +343,92 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
           hasCallToAction,
           suggestions,
         },
+      };
+    }
+  );
+
+  // ── linkedin_schedule_status ──────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_schedule_status",
+    {
+      title: "Daily Post Schedule",
+      description:
+        "Show the current daily auto-posting schedule: whether it's enabled, when it runs, and what topics it rotates through.",
+      inputSchema: {},
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async (): Promise<CallToolResult> => {
+      const config = getCronConfig();
+      const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Daily Auto-Post: ${config.enabled ? "✅ Enabled" : "❌ Disabled"}`,
+              `Schedule: ${config.cronExpr} (UTC)`,
+              `Topics: ${config.topics.length ? config.topics.join(", ") : "none set"}`,
+              `Visibility: ${config.visibility}`,
+              `Claude API key: ${hasAnthropicKey ? "✅ set" : "❌ missing"}`,
+              `LinkedIn auth: ${isAuthenticated() ? "✅ connected" : "❌ not connected"}`,
+              !config.enabled
+                ? "\nTo enable: set DAILY_POST_ENABLED=true in Railway Variables"
+                : "",
+              !hasAnthropicKey
+                ? "To generate posts: set ANTHROPIC_API_KEY in Railway Variables"
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        ],
+        structuredContent: { ...config, hasAnthropicKey, authenticated: isAuthenticated() },
+      };
+    }
+  );
+
+  // ── linkedin_post_now ─────────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_post_now",
+    {
+      title: "Generate & Post Now",
+      description:
+        "Use Claude AI to generate a LinkedIn post on a given topic, then show a draft review screen before publishing. Great for testing the daily post feature or posting on demand.",
+      inputSchema: {
+        topic: z
+          .string()
+          .min(1)
+          .describe("Topic or theme for the post (e.g. 'AI in healthcare', 'remote work tips')"),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({ topic }: { topic: string }): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+      if (!process.env.ANTHROPIC_API_KEY) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "ANTHROPIC_API_KEY is not set. Add it in Railway Variables to enable AI post generation.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const text = await generatePostText(topic);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Generated post about "${topic}" — showing draft for review before publishing.`,
+          },
+        ],
+        structuredContent: { stage: "draft", text, visibility: "PUBLIC", generatedTopic: topic },
       };
     }
   );
