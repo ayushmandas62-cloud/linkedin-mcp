@@ -17,7 +17,15 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
 
   // Health check — used by Railway and other platforms
   app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok", version: "1.0.0" });
+    res.json({
+      status: "ok",
+      version: "1.0.0",
+      env: {
+        LINKEDIN_CLIENT_ID: !!process.env.LINKEDIN_CLIENT_ID,
+        LINKEDIN_CLIENT_SECRET: !!process.env.LINKEDIN_CLIENT_SECRET,
+        LINKEDIN_REDIRECT_URI: process.env.LINKEDIN_REDIRECT_URI ?? null,
+      },
+    });
   });
 
   // OAuth callback — LinkedIn redirects here after user approves
