@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
-import { exchangeCodeForToken, initializeToken, resolveOAuthCallback } from "./linkedin-api.js";
+import { exchangeCodeForToken, initializeToken, REDIRECT_URI, resolveOAuthCallback } from "./linkedin-api.js";
 import { createServer } from "./server.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
@@ -17,17 +17,15 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
 
   // Health check — used by Railway and other platforms
   app.get("/health", (_req: Request, res: Response) => {
-    const { REDIRECT_URI } = await import("./linkedin-api.js");
     res.json({
       status: "ok",
       version: "1.0.0",
       env: {
         LINKEDIN_CLIENT_ID: !!process.env.LINKEDIN_CLIENT_ID,
         LINKEDIN_CLIENT_SECRET: !!process.env.LINKEDIN_CLIENT_SECRET,
-        LINKEDIN_REDIRECT_URI: process.env.LINKEDIN_REDIRECT_URI ?? null,
         RAILWAY_PUBLIC_DOMAIN: process.env.RAILWAY_PUBLIC_DOMAIN ?? null,
       },
-      computed_redirect_uri: REDIRECT_URI,
+      redirect_uri: REDIRECT_URI,
     });
   });
 
