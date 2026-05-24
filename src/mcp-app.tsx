@@ -44,6 +44,8 @@ interface PostAdvisor {
   mentions: string[];
   hasQuestion: boolean;
   hasCallToAction: boolean;
+  hasWeakHook: boolean;
+  isSalesy: boolean;
   suggestions: string[];
 }
 
@@ -66,8 +68,21 @@ interface ScheduleStatus {
   cronExpr: string;
   topics: string[];
   visibility: string;
-  hasAnthropicKey: boolean;
+  hasGeminiKey: boolean;
   authenticated: boolean;
+}
+
+interface QueueEntry {
+  id: string;
+  createdAt: string;
+  source: "cron" | "weekly-plan" | "manual";
+  topic?: string;
+  text: string;
+  imageUrl?: string;
+  visibility: "PUBLIC" | "CONNECTIONS";
+  status: "pending" | "published" | "rejected";
+  publishedAt?: string;
+  postId?: string;
 }
 
 interface AppState {
@@ -83,6 +98,7 @@ interface AppState {
   scheduleStatus: ScheduleStatus | null;
   weeklyPlan: WeeklyPost[] | null;
   rewrites: Rewrites | null;
+  queue: QueueEntry[] | null;
 }
 
 // ── Result parser ─────────────────────────────────────────────────────────────
@@ -98,8 +114,6 @@ function parseResult(result: CallToolResult): Partial<AppState> {
     return { connected: true, profile: s.profile as Profile, authUrl: null };
   if (s.status === "pending" && s.authUrl)
     return { connected: false, authUrl: s.authUrl as string };
-  if (s.email !== undefined)
-    return { connected: true, profile: s as unknown as Profile };
   if (s.stage === "draft" || s.stage === "published")
     return { post: s as unknown as PostData };
   if (s.score !== undefined && s.fields !== undefined)
@@ -112,23 +126,19 @@ function parseResult(result: CallToolResult): Partial<AppState> {
     return { weeklyPlan: s.weeklyPlan as WeeklyPost[] };
   if ("professional" in s && "storytelling" in s)
     return { rewrites: s as unknown as Rewrites };
+  if ("queue" in s && Array.isArray(s.queue))
+    return { queue: s.queue as QueueEntry[] };
+  // Profile from linkedin_profile tool (has email at top level)
+  if ("email" in s && "firstName" in s)
+    return { connected: true, profile: s as unknown as Profile };
 
   return {};
 }
 
 // ── ConnectView ───────────────────────────────────────────────────────────────
 
-function ConnectView({
-  app,
-  state,
-}: {
-  app: App;
-  state: AppState;
-}) {
-  const openLink = useCallback(
-    (url: string) => app.openLink({ url }),
-    [app]
-  );
+function ConnectView({ app, state }: { app: App; state: AppState }) {
+  const openLink = useCallback((url: string) => app.openLink({ url }), [app]);
 
   if (state.connected && state.profile) {
     return (
@@ -189,7 +199,7 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
   const [err, setErr] = useState<string | null>(null);
   const [localPost, setLocalPost] = useState<PostData | null>(post);
 
-  // ── Draft review screen (Claude's draft ready for approval) ───────────────
+  // Draft review screen
   if (localPost?.stage === "draft") {
     const { text, visibility, imageUrl } = localPost;
 
@@ -263,7 +273,7 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
     );
   }
 
-  // ── Published confirmation ─────────────────────────────────────────────────
+  // Published confirmation
   if (localPost?.stage === "published") {
     return (
       <div style={S.card}>
@@ -279,7 +289,7 @@ function PostView({ app, post, loading }: { app: App; post: PostData | null; loa
     );
   }
 
-  // ── Manual composer (fallback / "edit manually") ──────────────────────────
+  // Manual composer
   const remaining = 3000 - localText.length;
 
   return (
@@ -362,8 +372,6 @@ function ProfileCard({ profile }: { profile: Profile }) {
   );
 }
 
-// ── DefaultView ───────────────────────────────────────────────────────────────
-
 // ── ProfileAnalysisView ───────────────────────────────────────────────────────
 
 function ProfileAnalysisView({ analysis }: { analysis: ProfileAnalysis }) {
@@ -374,7 +382,6 @@ function ProfileAnalysisView({ analysis }: { analysis: ProfileAnalysis }) {
     <div style={S.card}>
       <h2 style={S.heading}>Profile Analysis</h2>
 
-      {/* Score ring */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <div style={{ ...S.scoreRing, borderColor: color }}>
           <span style={{ fontSize: 22, fontWeight: 700, color }}>{score}%</span>
@@ -385,7 +392,6 @@ function ProfileAnalysisView({ analysis }: { analysis: ProfileAnalysis }) {
         </div>
       </div>
 
-      {/* Field checklist */}
       <div style={S.checklist}>
         {Object.entries(fields).map(([field, ok]) => (
           <div key={field} style={S.checkRow}>
@@ -413,7 +419,7 @@ function ProfileAnalysisView({ analysis }: { analysis: ProfileAnalysis }) {
 // ── PostAdvisorView ───────────────────────────────────────────────────────────
 
 function PostAdvisorView({ advisor }: { advisor: PostAdvisor }) {
-  const { score, charCount, wordCount, readTimeSec, hashtags, suggestions, hasQuestion, hasCallToAction } = advisor;
+  const { score, charCount, wordCount, readTimeSec, hashtags, suggestions, hasQuestion, hasCallToAction, hasWeakHook, isSalesy } = advisor;
   const scoreColor = score >= 80 ? "var(--li-success)" : score >= 50 ? "#D97706" : "var(--li-error)";
 
   return (
@@ -432,11 +438,28 @@ function PostAdvisorView({ advisor }: { advisor: PostAdvisor }) {
       </div>
 
       <div style={S.metricsGrid}>
-        <div style={S.metric}><div style={S.metricVal}>{charCount}<span style={S.metricSub}>/3000</span></div><div style={S.metricLabel}>Characters</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{charCount}<span style={S.metricSub}>/3000</span></div><div style={S.metricLabel}>Chars</div></div>
         <div style={S.metric}><div style={S.metricVal}>{wordCount}</div><div style={S.metricLabel}>Words</div></div>
-        <div style={S.metric}><div style={S.metricVal}>{readTimeSec}s</div><div style={S.metricLabel}>Read time</div></div>
-        <div style={S.metric}><div style={S.metricVal}>{hashtags.length}</div><div style={S.metricLabel}>Hashtags</div></div>
-        <div style={S.metric}><div style={{ ...S.metricVal, color: hasQuestion || hasCallToAction ? "var(--li-success)" : "var(--li-error)" }}>{hasQuestion || hasCallToAction ? "✓" : "✗"}</div><div style={S.metricLabel}>Has CTA</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{readTimeSec}s</div><div style={S.metricLabel}>Read</div></div>
+        <div style={S.metric}><div style={S.metricVal}>{hashtags.length}</div><div style={S.metricLabel}>Tags</div></div>
+        <div style={S.metric}>
+          <div style={{ ...S.metricVal, color: hasQuestion || hasCallToAction ? "var(--li-success)" : "var(--li-error)" }}>
+            {hasQuestion || hasCallToAction ? "✓" : "✗"}
+          </div>
+          <div style={S.metricLabel}>CTA</div>
+        </div>
+        <div style={S.metric}>
+          <div style={{ ...S.metricVal, fontSize: 14, color: hasWeakHook ? "var(--li-error)" : "var(--li-success)" }}>
+            {hasWeakHook ? "⚠" : "✓"}
+          </div>
+          <div style={S.metricLabel}>Hook</div>
+        </div>
+        <div style={S.metric}>
+          <div style={{ ...S.metricVal, fontSize: 14, color: isSalesy ? "var(--li-error)" : "var(--li-success)" }}>
+            {isSalesy ? "⚠" : "✓"}
+          </div>
+          <div style={S.metricLabel}>Tone</div>
+        </div>
       </div>
 
       {hashtags.length > 0 && (
@@ -461,11 +484,11 @@ function PostAdvisorView({ advisor }: { advisor: PostAdvisor }) {
 // ── ScheduleView ──────────────────────────────────────────────────────────────
 
 function ScheduleView({ status }: { status: ScheduleStatus }) {
-  const allGood = status.enabled && status.hasAnthropicKey && status.authenticated && status.topics.length > 0;
+  const allGood = status.enabled && status.hasGeminiKey && status.authenticated && status.topics.length > 0;
 
   const checks = [
     { label: "Daily posting enabled", ok: status.enabled, fix: "Set DAILY_POST_ENABLED=true in Railway" },
-    { label: "Gemini API key set", ok: status.hasAnthropicKey, fix: "Set GEMINI_API_KEY in Railway" },
+    { label: "Gemini API key set", ok: status.hasGeminiKey, fix: "Set GEMINI_API_KEY in Railway" },
     { label: "LinkedIn connected", ok: status.authenticated, fix: "Say 'connect to LinkedIn'" },
     { label: "Topics configured", ok: status.topics.length > 0, fix: "Set DAILY_POST_TOPICS in Railway" },
   ];
@@ -477,6 +500,10 @@ function ScheduleView({ status }: { status: ScheduleStatus }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ ...S.statusDot, background: allGood ? "var(--li-success)" : "#D97706" }} />
         <span style={{ fontWeight: 600 }}>{allGood ? "Active" : "Needs configuration"}</span>
+      </div>
+
+      <div style={S.infoBox}>
+        AI generates drafts daily → saved to review queue → you approve before publishing
       </div>
 
       <div style={S.checklist}>
@@ -520,32 +547,164 @@ function ScheduleView({ status }: { status: ScheduleStatus }) {
   );
 }
 
-// ── WeeklyPlanView ────────────────────────────────────────────────────────────
+// ── QueueView ─────────────────────────────────────────────────────────────────
 
-function WeeklyPlanView({ app, posts }: { app: App; posts: WeeklyPost[] }) {
-  const [busy, setBusy] = useState<number | null>(null);
+function QueueView({ app, entries }: { app: App; entries: QueueEntry[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [localEntries, setLocalEntries] = useState<QueueEntry[]>(entries);
   const [err, setErr] = useState<string | null>(null);
 
-  const handlePost = async (post: WeeklyPost) => {
-    setBusy(post.day);
+  const handleApprove = async (entry: QueueEntry) => {
+    setBusy(entry.id);
     setErr(null);
     try {
       await app.callServerTool({
-        name: "linkedin_create_post",
-        arguments: { text: post.text, visibility: "PUBLIC", preview_only: true },
+        name: "linkedin_approve_post",
+        arguments: { queue_id: entry.id, confirm: true },
       });
+      setLocalEntries((prev) => prev.filter((e) => e.id !== entry.id));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
+      setConfirming(null);
     }
   };
+
+  const handleReject = async (entry: QueueEntry) => {
+    setBusy(entry.id);
+    setErr(null);
+    try {
+      await app.callServerTool({
+        name: "linkedin_reject_post",
+        arguments: { queue_id: entry.id },
+      });
+      setLocalEntries((prev) => prev.filter((e) => e.id !== entry.id));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+      setConfirming(null);
+    }
+  };
+
+  if (localEntries.length === 0) {
+    return (
+      <div style={S.card}>
+        <div style={S.successBadge}>Queue empty</div>
+        <h2 style={S.heading}>Post Queue</h2>
+        <p style={S.muted}>No posts waiting for review. AI-generated posts from the daily cron job and weekly planner will appear here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.heading}>Post Queue</h2>
+      <p style={S.muted}>{localEntries.length} post{localEntries.length !== 1 ? "s" : ""} waiting for review.</p>
+      {err && <p style={S.errText}>{err}</p>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {localEntries.map((entry) => {
+          const isConfirming = confirming === entry.id;
+          const isBusy = busy === entry.id;
+          const date = new Date(entry.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+          return (
+            <div key={entry.id} style={S.draftBlock}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={S.hashtagPill}>{entry.source}</span>
+                  {entry.topic && <span style={{ ...S.hashtagPill, background: "#F3E8FF", color: "#6D28D9" }}>{entry.topic}</span>}
+                </div>
+                <span style={{ fontSize: 11, color: "var(--li-text-muted)" }}>{date}</span>
+              </div>
+
+              <p style={{ ...S.draftText, fontSize: 13, WebkitLineClamp: 4, overflow: "hidden", display: "-webkit-box", WebkitBoxOrient: "vertical" }}>
+                {entry.text}
+              </p>
+              <div style={S.charCount}>{entry.text.length} chars · {entry.visibility === "PUBLIC" ? "🌐 Public" : "🔒 Connections"}</div>
+
+              {isConfirming ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ ...S.infoBox, fontSize: 13 }}>
+                    Publish this post to LinkedIn now?
+                  </div>
+                  <div style={S.buttonRow}>
+                    <button style={S.primaryBtn} onClick={() => handleApprove(entry)} disabled={isBusy}>
+                      {isBusy ? "Publishing…" : "Yes, publish"}
+                    </button>
+                    <button style={S.ghostBtn} onClick={() => setConfirming(null)} disabled={isBusy}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={S.buttonRow}>
+                  <button
+                    style={S.primaryBtn}
+                    onClick={() => setConfirming(entry.id)}
+                    disabled={busy !== null}
+                  >
+                    Approve & Publish
+                  </button>
+                  <button
+                    style={{ ...S.ghostBtn, color: "var(--li-error)", borderColor: "var(--li-error)" }}
+                    onClick={() => handleReject(entry)}
+                    disabled={busy !== null}
+                  >
+                    {isBusy ? "Removing…" : "Discard"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── WeeklyPlanView ────────────────────────────────────────────────────────────
+
+function WeeklyPlanView({ app, posts }: { app: App; posts: WeeklyPost[] }) {
+  const [err, setErr] = useState<string | null>(null);
+  const [sentToQueue, setSentToQueue] = useState(false);
+
+  const handleReviewPost = async (post: WeeklyPost) => {
+    setErr(null);
+    try {
+      const res = await app.callServerTool({
+        name: "linkedin_create_post",
+        arguments: { text: post.text, visibility: "PUBLIC", preview_only: true },
+      });
+      const patch = parseResult(res);
+      if (patch.error) setErr(patch.error);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  if (sentToQueue) {
+    return (
+      <div style={S.card}>
+        <div style={S.successBadge}>Added to queue</div>
+        <p style={S.muted}>All 7 posts are in your review queue. Ask Claude to call <code>linkedin_list_queue</code> to approve them one by one.</p>
+      </div>
+    );
+  }
 
   return (
     <div style={S.card}>
       <h2 style={S.heading}>Weekly Content Plan</h2>
-      <p style={S.muted}>7 AI-generated posts. Click "Review & Post" to open the draft review for any day.</p>
+      <p style={S.muted}>7 AI-generated posts. Click "Review & Post" for a single post, or all 7 are already saved to your queue.</p>
       {err && <p style={S.errText}>{err}</p>}
+
+      <button style={{ ...S.secondaryBtn, marginBottom: 4 }} onClick={() => setSentToQueue(true)}>
+        View all in queue →
+      </button>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {posts.map((post) => (
           <div key={post.day} style={{ ...S.draftBlock, gap: 6 }}>
@@ -558,10 +717,9 @@ function WeeklyPlanView({ app, posts }: { app: App; posts: WeeklyPost[] }) {
             </p>
             <button
               style={{ ...S.secondaryBtn, fontSize: 12, padding: "5px 14px" }}
-              onClick={() => handlePost(post)}
-              disabled={busy !== null}
+              onClick={() => handleReviewPost(post)}
             >
-              {busy === post.day ? "Opening…" : "Review & Post"}
+              Review & Post
             </button>
           </div>
         ))}
@@ -623,18 +781,38 @@ function RewriteView({ app, rewrites }: { app: App; rewrites: Rewrites }) {
   );
 }
 
+// ── DefaultView ───────────────────────────────────────────────────────────────
+
 function DefaultView() {
   return (
     <div style={S.card}>
       <div style={S.liLogo}>in</div>
       <h2 style={S.heading}>LinkedIn MCP</h2>
       <p style={S.muted}>
-        Available tools: <code>linkedin_connect</code> · <code>linkedin_profile</code> ·{" "}
-        <code>linkedin_create_post</code> · <code>linkedin_post_image</code> ·{" "}
-        <code>linkedin_post_advisor</code> · <code>linkedin_analyze_profile</code> ·{" "}
-        <code>linkedin_post_now</code> · <code>linkedin_schedule_status</code> ·{" "}
-        <code>linkedin_disconnect</code>
+        Available tools:
       </p>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {[
+          "linkedin_connect",
+          "linkedin_profile",
+          "linkedin_create_post",
+          "linkedin_post_image",
+          "linkedin_post_advisor",
+          "linkedin_analyze_profile",
+          "linkedin_post_now",
+          "linkedin_schedule_status",
+          "linkedin_list_queue",
+          "linkedin_approve_post",
+          "linkedin_reject_post",
+          "linkedin_weekly_plan",
+          "linkedin_rewrite_post",
+          "linkedin_delete_post",
+          "linkedin_doctor",
+          "linkedin_disconnect",
+        ].map((tool) => (
+          <span key={tool} style={{ ...S.hashtagPill, fontFamily: "monospace", fontSize: 11 }}>{tool}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -646,7 +824,7 @@ function LinkedInApp() {
     tool: null, loading: false, error: null,
     connected: false, authUrl: null, profile: null, post: null,
     profileAnalysis: null, postAdvisor: null, scheduleStatus: null,
-    weeklyPlan: null, rewrites: null,
+    weeklyPlan: null, rewrites: null, queue: null,
   });
 
   const { app, error: connErr } = useApp({
@@ -654,7 +832,19 @@ function LinkedInApp() {
     capabilities: {},
     onAppCreated: (app) => {
       app.ontoolinput = async (input) => {
-        setState((s) => ({ ...s, tool: input.name, loading: true, error: null, post: null, profileAnalysis: null, postAdvisor: null, scheduleStatus: null, weeklyPlan: null, rewrites: null }));
+        setState((s) => ({
+          ...s,
+          tool: input.name,
+          loading: true,
+          error: null,
+          post: null,
+          profileAnalysis: null,
+          postAdvisor: null,
+          scheduleStatus: null,
+          weeklyPlan: null,
+          rewrites: null,
+          queue: null,
+        }));
       };
       app.ontoolresult = async (result) => {
         setState((s) => ({ ...s, loading: false, ...parseResult(result) }));
@@ -685,6 +875,8 @@ function LinkedInApp() {
       {tool === "linkedin_post_image" && <PostView app={app} post={post} loading={loading} />}
       {tool === "linkedin_weekly_plan" && state.weeklyPlan && <WeeklyPlanView app={app} posts={state.weeklyPlan} />}
       {tool === "linkedin_rewrite_post" && state.rewrites && <RewriteView app={app} rewrites={state.rewrites} />}
+      {tool === "linkedin_list_queue" && state.queue !== null && <QueueView app={app} entries={state.queue} />}
+      {tool === "linkedin_approve_post" && <PostView app={app} post={post} loading={loading} />}
       {!tool && <DefaultView />}
     </div>
   );
@@ -724,11 +916,11 @@ const S: Record<string, React.CSSProperties> = {
   checklist: { display: "flex", flexDirection: "column", gap: 8 },
   checkRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14 },
   infoBox: { background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: "var(--li-radius)", padding: "10px 14px", fontSize: 13, color: "#1E40AF" },
-  metricsGrid: { display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8 },
-  metric: { background: "#F9FAFB", borderRadius: "var(--li-radius)", padding: "10px 6px", textAlign: "center" },
-  metricVal: { fontSize: 18, fontWeight: 700, color: "var(--li-text)" },
-  metricSub: { fontSize: 11, fontWeight: 400, color: "var(--li-text-muted)" },
-  metricLabel: { fontSize: 11, color: "var(--li-text-muted)", marginTop: 2 },
+  metricsGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 },
+  metric: { background: "#F9FAFB", borderRadius: "var(--li-radius)", padding: "8px 4px", textAlign: "center" },
+  metricVal: { fontSize: 16, fontWeight: 700, color: "var(--li-text)" },
+  metricSub: { fontSize: 10, fontWeight: 400, color: "var(--li-text-muted)" },
+  metricLabel: { fontSize: 10, color: "var(--li-text-muted)", marginTop: 2 },
   hashtagPill: { background: "#EFF6FF", color: "var(--li-blue)", padding: "3px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600 },
   suggestionBox: { background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: "var(--li-radius)", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
   suggestion: { fontSize: 13, color: "#92400E" },

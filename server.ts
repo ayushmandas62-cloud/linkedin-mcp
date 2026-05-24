@@ -17,11 +17,13 @@ import {
   getEmail,
   getProfile,
   isAuthenticated,
+  REDIRECT_URI,
   revokeToken,
   setPendingOAuthResolve,
   uploadImage,
 } from "./linkedin-api.js";
 import { generatePostText, generateRewrites, generateWeeklyPlan, getCronConfig } from "./cron.js";
+import { addToQueue, getQueueEntry, listQueue, updateQueueEntry } from "./queue.js";
 
 const DIST_DIR = import.meta.filename.endsWith(".ts")
   ? path.join(import.meta.dirname, "dist")
@@ -30,7 +32,6 @@ const DIST_DIR = import.meta.filename.endsWith(".ts")
 const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET ?? "";
 
-// All tools share one UI resource
 const APP_RESOURCE_URI = "ui://linkedin/mcp-app.html";
 
 function missingCredentialsResult(): CallToolResult {
@@ -92,10 +93,8 @@ export function createServer(): McpServer {
 
       const authUrl = generateAuthUrl(CLIENT_ID);
 
-      // Wait up to 120 s for the OAuth callback
       const code = await new Promise<string | null>((resolve) => {
         setPendingOAuthResolve(resolve);
-        setTimeout(() => resolve(null), 120_000);
       });
 
       if (!code) {
@@ -298,6 +297,20 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
       const hasCallToAction = /comment|share|thoughts|think|let me know|drop|agree|disagree/i.test(text);
       const readTimeSec = Math.ceil(wordCount / 4);
 
+      // Hook strength: first line should hook the reader
+      const firstLine = text.split("\n")[0] ?? "";
+      const weakHookPatterns = /^(today|i am|i'm|just|so |well |here is|here's|excited to|happy to|proud to)/i;
+      const hasWeakHook = weakHookPatterns.test(firstLine.trim());
+
+      // Salesiness: promotional language reduces reach
+      const salesyPatterns = /buy now|click here|limited offer|discount|promo|sign up now|don't miss/i;
+      const isSalesy = salesyPatterns.test(text);
+
+      // Repeated hashtags: detect duplicates
+      const hashtagLower = hashtags.map((h) => h.toLowerCase());
+      const uniqueHashtags = new Set(hashtagLower);
+      const hasDuplicateHashtags = uniqueHashtags.size < hashtags.length;
+
       const suggestions: string[] = [];
       if (charCount < 150) suggestions.push("Too short — add more context or a story to boost engagement.");
       if (charCount > 2500) suggestions.push("Very long — consider trimming or splitting into a series.");
@@ -305,16 +318,20 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
       if (hashtags.length > 8) suggestions.push("Too many hashtags (8+) looks spammy — keep it to 3–5.");
       if (paragraphs < 2) suggestions.push("Break into shorter paragraphs for easier mobile reading.");
       if (!hasQuestion && !hasCallToAction) suggestions.push("Add a question or call-to-action to encourage comments.");
+      if (hasWeakHook) suggestions.push(`Weak opening hook: "${firstLine.slice(0, 60)}…" — start with a bold claim, surprising stat, or story.`);
+      if (isSalesy) suggestions.push("Post reads as promotional. LinkedIn penalizes salesy content — focus on value and story.");
+      if (hasDuplicateHashtags) suggestions.push("Duplicate hashtags detected — each hashtag should appear only once.");
 
-      const score = Math.max(
-        0,
-        100 -
-          (charCount < 150 ? 20 : 0) -
-          (charCount > 2500 ? 15 : 0) -
-          (hashtags.length === 0 ? 20 : hashtags.length > 8 ? 10 : 0) -
-          (paragraphs < 2 ? 15 : 0) -
-          (!hasQuestion && !hasCallToAction ? 15 : 0)
-      );
+      const penalty =
+        (charCount < 150 ? 20 : 0) +
+        (charCount > 2500 ? 15 : 0) +
+        (hashtags.length === 0 ? 20 : hashtags.length > 8 ? 10 : 0) +
+        (paragraphs < 2 ? 10 : 0) +
+        (!hasQuestion && !hasCallToAction ? 10 : 0) +
+        (hasWeakHook ? 10 : 0) +
+        (isSalesy ? 15 : 0) +
+        (hasDuplicateHashtags ? 5 : 0);
+      const score = Math.max(0, 100 - penalty);
 
       return {
         content: [
@@ -328,6 +345,8 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
               `Mentions: ${mentions.length}`,
               `Paragraphs: ${paragraphs}`,
               `Has CTA/question: ${hasQuestion || hasCallToAction ? "yes" : "no"}`,
+              `Hook strength: ${hasWeakHook ? "⚠ weak" : "✓ good"}`,
+              `Salesy content: ${isSalesy ? "⚠ detected" : "✓ none"}`,
               suggestions.length
                 ? `\nSuggestions:\n${suggestions.map((s) => `• ${s}`).join("\n")}`
                 : "\n✅ Post looks well-optimized!",
@@ -344,6 +363,8 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
           mentions,
           hasQuestion,
           hasCallToAction,
+          hasWeakHook,
+          isSalesy,
           suggestions,
         },
       };
@@ -363,7 +384,7 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
     },
     async (): Promise<CallToolResult> => {
       const config = getCronConfig();
-      const hasAnthropicKey = !!process.env.GEMINI_API_KEY;
+      const hasGeminiKey = !!process.env.GEMINI_API_KEY;
 
       return {
         content: [
@@ -374,12 +395,13 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
               `Schedule: ${config.cronExpr} (UTC)`,
               `Topics: ${config.topics.length ? config.topics.join(", ") : "none set"}`,
               `Visibility: ${config.visibility}`,
-              `Gemini API key: ${hasAnthropicKey ? "✅ set" : "❌ missing (free at aistudio.google.com)"}`,
+              `Post mode: AI generates drafts → saved to review queue → you approve before publishing`,
+              `Gemini API key: ${hasGeminiKey ? "✅ set" : "❌ missing (free at aistudio.google.com)"}`,
               `LinkedIn auth: ${isAuthenticated() ? "✅ connected" : "❌ not connected"}`,
               !config.enabled
                 ? "\nTo enable: set DAILY_POST_ENABLED=true in Railway Variables"
                 : "",
-              !hasAnthropicKey
+              !hasGeminiKey
                 ? "To generate posts: set GEMINI_API_KEY in Railway Variables"
                 : "",
             ]
@@ -387,7 +409,7 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
               .join("\n"),
           },
         ],
-        structuredContent: { ...config, hasAnthropicKey, authenticated: isAuthenticated() },
+        structuredContent: { ...config, hasGeminiKey, authenticated: isAuthenticated() },
       };
     }
   );
@@ -399,7 +421,7 @@ Never skip step 1 and publish directly unless the user explicitly says "publish 
     {
       title: "Generate & Post Now",
       description:
-        "Use Claude AI to generate a LinkedIn post on a given topic, then show a draft review screen before publishing. Great for testing the daily post feature or posting on demand.",
+        "Use Gemini AI to generate a LinkedIn post on a given topic, then show a draft review screen before publishing. Great for testing the daily post feature or posting on demand.",
       inputSchema: {
         topic: z
           .string()
@@ -513,13 +535,150 @@ WORKFLOW:
   // ── linkedin_delete_post ──────────────────────────────────────────────────
   server.tool(
     "linkedin_delete_post",
-    "Delete one of your LinkedIn posts by its ID. Ask the user to confirm before calling this.",
-    { post_id: z.string().min(1).describe("The post ID returned when the post was created") },
-    async ({ post_id }: { post_id: string }): Promise<CallToolResult> => {
+    "Delete one of your LinkedIn posts by its ID. Only call this after the user has explicitly confirmed deletion.",
+    {
+      post_id: z.string().min(1).describe("The post ID returned when the post was created"),
+      confirm: z
+        .literal(true)
+        .describe("Must be true. Set only after the user explicitly confirms deletion."),
+    },
+    async ({ post_id }: { post_id: string; confirm: true }): Promise<CallToolResult> => {
       if (!isAuthenticated()) return notConnectedResult();
       await deletePost(post_id);
       return {
         content: [{ type: "text", text: `Post ${post_id} deleted successfully.` }],
+      };
+    }
+  );
+
+  // ── linkedin_list_queue ───────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_list_queue",
+    {
+      title: "Review Post Queue",
+      description:
+        "Show all AI-generated posts waiting for your approval before publishing. Use linkedin_approve_post to publish one or linkedin_reject_post to discard.",
+      inputSchema: {},
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async (): Promise<CallToolResult> => {
+      const pending = await listQueue("pending");
+
+      if (pending.length === 0) {
+        return {
+          content: [{ type: "text", text: "No posts waiting for review. Queue is empty." }],
+          structuredContent: { queue: [], count: 0 },
+        };
+      }
+
+      const summary = pending
+        .map((e, i) => `${i + 1}. [${e.id.slice(0, 8)}] ${e.topic ?? "no topic"} — ${e.text.slice(0, 80)}…`)
+        .join("\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${pending.length} post(s) waiting for review:\n\n${summary}\n\nUse the UI to approve or reject each post.`,
+          },
+        ],
+        structuredContent: { queue: pending, count: pending.length },
+      };
+    }
+  );
+
+  // ── linkedin_approve_post ─────────────────────────────────────────────────
+  registerAppTool(
+    server,
+    "linkedin_approve_post",
+    {
+      title: "Approve & Publish Queued Post",
+      description:
+        "Publish a queued post. Always show the post content to the user for confirmation before calling this. Pass edited_text if the user wants to make changes first.",
+      inputSchema: {
+        queue_id: z.string().describe("The queue entry ID (from linkedin_list_queue)"),
+        edited_text: z
+          .string()
+          .optional()
+          .describe("Optional: override the original text with user-edited version"),
+        confirm: z
+          .literal(true)
+          .describe("Must be true — set only after user has seen and approved the post content."),
+      },
+      _meta: { ui: { resourceUri: APP_RESOURCE_URI } },
+    },
+    async ({
+      queue_id,
+      edited_text,
+      confirm: _confirm,
+    }: {
+      queue_id: string;
+      edited_text?: string;
+      confirm: true;
+    }): Promise<CallToolResult> => {
+      if (!isAuthenticated()) return notConnectedResult();
+
+      const entry = await getQueueEntry(queue_id);
+      if (!entry) {
+        return {
+          content: [{ type: "text", text: `Queue entry ${queue_id} not found.` }],
+          isError: true,
+        };
+      }
+      if (entry.status !== "pending") {
+        return {
+          content: [{ type: "text", text: `Entry ${queue_id} is already ${entry.status}.` }],
+          isError: true,
+        };
+      }
+
+      const text = edited_text ?? entry.text;
+      const profile = await getProfile();
+      const result = await createPost(profile.id, text, entry.visibility);
+
+      await updateQueueEntry(queue_id, {
+        status: "published",
+        publishedAt: new Date().toISOString(),
+        postId: result.id,
+        text,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Post published! ID: ${result.id}\n\n${text.slice(0, 200)}${text.length > 200 ? "…" : ""}`,
+          },
+        ],
+        structuredContent: { stage: "published", postId: result.id, text, visibility: entry.visibility },
+      };
+    }
+  );
+
+  // ── linkedin_reject_post ──────────────────────────────────────────────────
+  server.tool(
+    "linkedin_reject_post",
+    "Discard a queued post without publishing it.",
+    {
+      queue_id: z.string().describe("The queue entry ID (from linkedin_list_queue)"),
+    },
+    async ({ queue_id }: { queue_id: string }): Promise<CallToolResult> => {
+      const entry = await updateQueueEntry(queue_id, { status: "rejected" });
+      if (!entry) {
+        return {
+          content: [{ type: "text", text: `Queue entry ${queue_id} not found.` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Post discarded: "${entry.text.slice(0, 80)}…"`,
+          },
+        ],
+        structuredContent: { rejected: true, queue_id },
       };
     }
   );
@@ -559,8 +718,19 @@ WORKFLOW:
 
       const posts = await generateWeeklyPlan(topicList);
 
+      // Add all 7 posts to the queue as pending
+      for (const post of posts) {
+        await addToQueue({
+          source: "weekly-plan",
+          topic: post.topic,
+          text: post.text,
+          visibility: "PUBLIC",
+          status: "pending",
+        });
+      }
+
       return {
-        content: [{ type: "text", text: `Generated ${posts.length} posts for the week. Review them in the UI.` }],
+        content: [{ type: "text", text: `Generated ${posts.length} posts for the week. All added to queue for review. Use linkedin_list_queue to approve.` }],
         structuredContent: { weeklyPlan: posts },
       };
     }
@@ -589,6 +759,53 @@ WORKFLOW:
       return {
         content: [{ type: "text", text: "Here are 3 rewrites. Pick one from the UI or ask Claude to mix elements." }],
         structuredContent: { original: text, ...rewrites },
+      };
+    }
+  );
+
+  // ── linkedin_doctor ───────────────────────────────────────────────────────
+  server.tool(
+    "linkedin_doctor",
+    "Run a setup health check: verify env vars, LinkedIn auth, Gemini key, redirect URI, and build assets. Call this first if anything seems misconfigured.",
+    {},
+    async (): Promise<CallToolResult> => {
+      const hasClientId = !!process.env.LINKEDIN_CLIENT_ID;
+      const hasClientSecret = !!process.env.LINKEDIN_CLIENT_SECRET;
+      const hasGeminiKey = !!process.env.GEMINI_API_KEY;
+      const authenticated = isAuthenticated();
+
+      let buildAssetsOk = false;
+      try {
+        await fs.access(path.join(DIST_DIR, "mcp-app.html"));
+        buildAssetsOk = true;
+      } catch {}
+
+      const checks = [
+        { label: "LINKEDIN_CLIENT_ID set", ok: hasClientId, fix: "Set LINKEDIN_CLIENT_ID env var" },
+        { label: "LINKEDIN_CLIENT_SECRET set", ok: hasClientSecret, fix: "Set LINKEDIN_CLIENT_SECRET env var" },
+        { label: "LinkedIn authenticated", ok: authenticated, fix: "Call linkedin_connect" },
+        { label: "GEMINI_API_KEY set", ok: hasGeminiKey, fix: "Optional: set GEMINI_API_KEY for AI generation (free at aistudio.google.com)" },
+        { label: "Build assets present", ok: buildAssetsOk, fix: "Run: npm run build" },
+      ];
+
+      const allOk = checks.every((c) => c.ok || c.label.startsWith("GEMINI"));
+      const lines = checks.map((c) => `${c.ok ? "✅" : "❌"} ${c.label}${!c.ok ? `\n   → ${c.fix}` : ""}`);
+
+      lines.push("");
+      lines.push(`Redirect URI: ${REDIRECT_URI}`);
+      lines.push("(This must match exactly what you set in your LinkedIn App → Auth → Redirect URLs)");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `LinkedIn MCP — Setup Doctor ${allOk ? "✅ All good!" : "⚠ Issues found"}`,
+              "",
+              ...lines,
+            ].join("\n"),
+          },
+        ],
       };
     }
   );

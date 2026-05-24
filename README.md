@@ -9,6 +9,14 @@ An MCP server that lets Claude interact with LinkedIn via OAuth 2.0, with a rich
 | `linkedin_connect` | Authenticate with LinkedIn (opens OAuth flow, waits for callback) |
 | `linkedin_profile` | Retrieve your profile: name, headline, email |
 | `linkedin_create_post` | Publish a text post (up to 3 000 characters, public or connections-only) |
+| `linkedin_post_image` | Preview and publish an image post from a public image URL |
+| `linkedin_post_advisor` | Score a draft and suggest improvements before publishing |
+| `linkedin_rewrite_post` | Generate professional, storytelling, and thought-leader rewrites |
+| `linkedin_weekly_plan` | Generate a 7-day content plan for review |
+| `linkedin_schedule_status` | Check daily draft-generation configuration |
+| `linkedin_post_now` | Generate a post on demand and show it for review |
+| `linkedin_analyze_profile` | Score basic profile completeness |
+| `linkedin_delete_post` | Delete a post after explicit confirmation |
 | `linkedin_disconnect` | Remove stored credentials |
 
 ## Setup
@@ -31,7 +39,9 @@ export LINKEDIN_CLIENT_ID=your_client_id
 export LINKEDIN_CLIENT_SECRET=your_client_secret
 ```
 
-Or create a `.env` file (use `dotenv` or set vars before running).
+Or copy `.env.example` to `.env` and load it with your process manager before running.
+
+The default redirect URI is `http://localhost:3001/auth/callback`. For hosted deployments, set `LINKEDIN_REDIRECT_URI` explicitly or set `RAILWAY_PUBLIC_DOMAIN`.
 
 ### 3. Install & Build
 
@@ -83,6 +93,18 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```bash
 npm run dev   # watch mode: rebuilds UI + restarts server on changes
 ```
+
+## Daily Draft Generation
+
+Daily generation is disabled by default. To enable it:
+
+```bash
+export DAILY_POST_ENABLED=true
+export DAILY_POST_TOPICS="AI trends,productivity,career growth"
+export GEMINI_API_KEY=your_gemini_key
+```
+
+Generated daily posts are saved for review in `~/.linkedin-mcp-drafts` by default. Set `DAILY_POST_REQUIRE_REVIEW=false` only if you intentionally want generated posts to publish without manual review.
 
 ## OAuth Flow
 

@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import cron from "node-cron";
 import { createPost, getProfile, initializeToken, isAuthenticated } from "./linkedin-api.js";
+import { addToQueue } from "./queue.js";
 
 export interface CronConfig {
   enabled: boolean;
@@ -26,7 +27,7 @@ export async function generatePostText(topic: string): Promise<string> {
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set. Get a free key at aistudio.google.com/app/apikey");
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   const prompt = `Write a LinkedIn post about: ${topic}
 
@@ -43,17 +44,18 @@ Return ONLY the post text, nothing else.`;
   return result.response.text().trim();
 }
 
+// Sequential to avoid Gemini rate limits on free-tier keys
 export async function generateWeeklyPlan(
   topics: string[]
 ): Promise<{ day: number; dayName: string; topic: string; text: string }[]> {
   const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-  return Promise.all(
-    days.map(async (dayName, i) => {
-      const topic = topics[i % topics.length];
-      const text = await generatePostText(topic);
-      return { day: i + 1, dayName, topic, text };
-    })
-  );
+  const results: { day: number; dayName: string; topic: string; text: string }[] = [];
+  for (let i = 0; i < days.length; i++) {
+    const topic = topics[i % topics.length];
+    const text = await generatePostText(topic);
+    results.push({ day: i + 1, dayName: days[i], topic, text });
+  }
+  return results;
 }
 
 export async function generateRewrites(
@@ -63,7 +65,7 @@ export async function generateRewrites(
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set. Get a free key at aistudio.google.com/app/apikey");
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   const prompt = `Rewrite this LinkedIn post in 3 different styles. Keep 150–300 words and add 3–5 hashtags to each.
 
@@ -102,7 +104,7 @@ export function startCronJob(): void {
     return;
   }
   if (!process.env.GEMINI_API_KEY) {
-    console.warn("[cron] DAILY_POST_ENABLED=true but ANTHROPIC_API_KEY not set — skipping");
+    console.warn("[cron] DAILY_POST_ENABLED=true but GEMINI_API_KEY not set — skipping");
     return;
   }
   if (config.topics.length === 0) {
@@ -129,12 +131,19 @@ export function startCronJob(): void {
         console.log(`[cron] Generating post on topic: "${topic}"`);
 
         const text = await generatePostText(topic);
-        const profile = await getProfile();
-        const result = await createPost(profile.id, text, config.visibility);
 
-        console.log(`[cron] ✅ Posted! ID: ${result.id} | Topic: ${topic}`);
+        // Always queue for human review — never auto-publish AI content
+        const entry = await addToQueue({
+          source: "cron",
+          topic,
+          text,
+          visibility: config.visibility,
+          status: "pending",
+        });
+        console.log(`[cron] Post queued for review: ${entry.id} | Topic: ${topic}`);
+        console.log("[cron] Review and publish via linkedin_list_queue");
       } catch (err) {
-        console.error("[cron] ❌ Failed:", err instanceof Error ? err.message : String(err));
+        console.error("[cron] Failed:", err instanceof Error ? err.message : String(err));
       }
     },
     { timezone: "UTC" }
@@ -142,4 +151,5 @@ export function startCronJob(): void {
 
   console.log(`[cron] Daily post scheduled — expr: "${config.cronExpr}" UTC`);
   console.log(`[cron] Topics pool: ${config.topics.join(" | ")}`);
+  console.log("[cron] Posts queue for human review — use linkedin_list_queue to approve");
 }

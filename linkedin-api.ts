@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
+import dns from "node:dns/promises";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -7,8 +9,11 @@ export const REDIRECT_URI =
   process.env.LINKEDIN_REDIRECT_URI ??
   (process.env.RAILWAY_PUBLIC_DOMAIN
     ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/auth/callback`
-    : "https://linkedin-mcp-production-3d70.up.railway.app/auth/callback");
+    : "http://localhost:3001/auth/callback");
 const TOKEN_FILE = path.join(os.homedir(), ".linkedin-mcp-token.json");
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_REDIRECTS = 3;
+const OAUTH_STATE_TTL_MS = 120_000;
 
 export interface TokenData {
   access_token: string;
@@ -26,8 +31,11 @@ export interface LinkedInProfile {
 
 // Module-level singleton state — shared across per-request server instances
 let tokenData: TokenData | null = null;
-let oauthState: string | null = null;
-let pendingOAuthResolve: ((code: string) => void) | null = null;
+let latestOAuthState: string | null = null;
+const pendingOAuthResolves = new Map<
+  string,
+  { resolve: (code: string | null) => void; timeout: NodeJS.Timeout }
+>();
 
 export async function initializeToken(): Promise<void> {
   try {
@@ -50,28 +58,36 @@ export function isAuthenticated(): boolean {
 }
 
 export function generateAuthUrl(clientId: string): string {
-  oauthState = crypto.randomBytes(16).toString("hex");
+  latestOAuthState = crypto.randomBytes(16).toString("hex");
   const params = new URLSearchParams({
     response_type: "code",
     client_id: clientId,
     redirect_uri: REDIRECT_URI,
-    state: oauthState,
+    state: latestOAuthState,
     scope: "openid profile email w_member_social",
   });
   return `https://www.linkedin.com/oauth/v2/authorization?${params}`;
 }
 
-export function setPendingOAuthResolve(resolve: (code: string) => void): void {
-  pendingOAuthResolve = resolve;
+export function setPendingOAuthResolve(resolve: (code: string | null) => void): void {
+  if (!latestOAuthState) {
+    throw new Error("No OAuth state has been generated for this auth request.");
+  }
+  const state = latestOAuthState;
+  const timeout = setTimeout(() => {
+    pendingOAuthResolves.delete(state);
+    resolve(null);
+  }, OAUTH_STATE_TTL_MS);
+  timeout.unref();
+  pendingOAuthResolves.set(state, { resolve, timeout });
 }
 
 export function resolveOAuthCallback(code: string, state: string): boolean {
-  if (state !== oauthState) return false;
-  oauthState = null;
-  if (pendingOAuthResolve) {
-    pendingOAuthResolve(code);
-    pendingOAuthResolve = null;
-  }
+  const pending = pendingOAuthResolves.get(state);
+  if (!pending) return false;
+  pendingOAuthResolves.delete(state);
+  clearTimeout(pending.timeout);
+  pending.resolve(code);
   return true;
 }
 
@@ -225,11 +241,8 @@ export async function uploadImage(imageUrl: string, ownerId: string): Promise<st
   );
   const { uploadUrl, image: imageUrn } = (initJson as { value: { uploadUrl: string; image: string } }).value;
 
-  // Step 2: Fetch image bytes from URL
-  const imgResponse = await fetch(imageUrl);
-  if (!imgResponse.ok) throw new Error(`Could not fetch image from URL (${imgResponse.status})`);
-  const imgBytes = await imgResponse.arrayBuffer();
-  const contentType = imgResponse.headers.get("content-type") ?? "image/jpeg";
+  // Step 2: Fetch image bytes from a public URL only.
+  const { bytes: imgBytes, contentType } = await fetchPublicImage(imageUrl);
 
   // Step 3: Upload binary to LinkedIn's presigned URL
   const uploadResponse = await fetch(uploadUrl, {
@@ -246,6 +259,146 @@ export async function uploadImage(imageUrl: string, ownerId: string): Promise<st
   }
 
   return imageUrn;
+}
+
+async function fetchPublicImage(
+  imageUrl: string,
+  redirects = 0
+): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  if (redirects > MAX_IMAGE_REDIRECTS) {
+    throw new Error(`Image URL followed too many redirects (${MAX_IMAGE_REDIRECTS} max).`);
+  }
+
+  const url = await validatePublicHttpUrl(imageUrl);
+  const response = await fetch(url, {
+    redirect: "manual",
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (!location) throw new Error("Image URL redirected without a Location header.");
+    return fetchPublicImage(new URL(location, url).toString(), redirects + 1);
+  }
+
+  if (!response.ok) throw new Error(`Could not fetch image from URL (${response.status})`);
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("image/")) {
+    throw new Error(`Image URL must return an image/* content type. Received: ${contentType || "unknown"}`);
+  }
+
+  const lengthHeader = response.headers.get("content-length");
+  if (lengthHeader && Number(lengthHeader) > MAX_IMAGE_BYTES) {
+    throw new Error("Image is too large. Maximum supported size is 10 MB.");
+  }
+
+  const body = response.body;
+  if (!body) throw new Error("Image response had no body.");
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_IMAGE_BYTES) {
+      await reader.cancel();
+      throw new Error("Image is too large. Maximum supported size is 10 MB.");
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return { bytes: bytes.buffer, contentType };
+}
+
+async function validatePublicHttpUrl(rawUrl: string): Promise<string> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("Image URL is invalid.");
+  }
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Image URL must use http or https.");
+  }
+  if (url.username || url.password) {
+    throw new Error("Image URL must not include embedded credentials.");
+  }
+
+  const hostname = url.hostname;
+  if (isBlockedHostname(hostname)) {
+    throw new Error("Image URL must point to a public host.");
+  }
+
+  const literalIpVersion = net.isIP(hostname);
+  if (literalIpVersion) {
+    if (isBlockedIp(hostname)) throw new Error("Image URL must point to a public IP address.");
+    return url.toString();
+  }
+
+  const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0 || addresses.some(({ address }) => isBlockedIp(address))) {
+    throw new Error("Image URL resolved to a blocked or private address.");
+  }
+
+  return url.toString();
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local") ||
+    normalized.endsWith(".internal")
+  );
+}
+
+function isBlockedIp(address: string): boolean {
+  const version = net.isIP(address);
+  if (version === 4) return isBlockedIpv4(address);
+  if (version === 6) return isBlockedIpv6(address);
+  return true;
+}
+
+function isBlockedIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return true;
+  }
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+function isBlockedIpv6(address: string): boolean {
+  const normalized = address.toLowerCase();
+  return (
+    normalized === "::1" ||
+    normalized === "::" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe80:")
+  );
 }
 
 export async function createImagePost(
@@ -278,17 +431,34 @@ export async function createImagePost(
 
 export async function deletePost(postId: string): Promise<void> {
   if (!tokenData) throw new Error("Not authenticated with LinkedIn");
-  const urn = postId.startsWith("urn:") ? postId : `urn:li:ugcPost:${postId}`;
-  const response = await fetch(
-    `https://api.linkedin.com/v2/ugcPosts/${encodeURIComponent(urn)}`,
-    {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-        "X-Restli-Protocol-Version": "2.0.0",
-      },
-    }
-  );
+
+  // urn:li:share:* posts are created via the REST Posts API; everything else via UGC Posts API
+  let response: Response;
+  if (postId.startsWith("urn:li:share:")) {
+    response = await fetch(
+      `https://api.linkedin.com/rest/posts/${encodeURIComponent(postId)}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          "LinkedIn-Version": "202312",
+        },
+      }
+    );
+  } else {
+    const urn = postId.startsWith("urn:") ? postId : `urn:li:ugcPost:${postId}`;
+    response = await fetch(
+      `https://api.linkedin.com/v2/ugcPosts/${encodeURIComponent(urn)}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          "X-Restli-Protocol-Version": "2.0.0",
+        },
+      }
+    );
+  }
+
   if (response.status === 401) {
     tokenData = null;
     throw new Error("LinkedIn session expired. Please reconnect using linkedin_connect.");

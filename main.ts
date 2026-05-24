@@ -4,14 +4,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
-import { exchangeCodeForToken, initializeToken, REDIRECT_URI, resolveOAuthCallback } from "./linkedin-api.js";
+import { initializeToken, REDIRECT_URI, resolveOAuthCallback } from "./linkedin-api.js";
 import { startCronJob } from "./cron.js";
 import { createServer } from "./server.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
-const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID ?? "";
-const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET ?? "";
-
 async function startHttpServer(factory: () => McpServer): Promise<void> {
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
@@ -48,17 +45,12 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
 
     // Validate state and notify any waiting tool call
     const matched = resolveOAuthCallback(code, state);
-
-    try {
-      // Always exchange the code even if no tool call is waiting
-      await exchangeCodeForToken(code, CLIENT_ID, CLIENT_SECRET);
-      res.send(callbackPage("success", "You are now connected to LinkedIn. You can close this tab."));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(500).send(callbackPage("error", `Token exchange failed: ${message}`));
+    if (!matched) {
+      res.status(400).send(callbackPage("error", "Invalid or expired OAuth state. Please start the LinkedIn connection again."));
+      return;
     }
 
-    void matched; // used to notify waiting tool call via resolveOAuthCallback side-effect
+    res.send(callbackPage("success", "Authorization received. Return to your MCP host to finish connecting."));
   });
 
   // MCP endpoint — stateless per-request
@@ -111,6 +103,7 @@ async function startStdioServer(factory: () => McpServer): Promise<void> {
 function callbackPage(status: "success" | "error", message: string): string {
   const color = status === "success" ? "#0A66C2" : "#CC1016";
   const icon = status === "success" ? "✓" : "✗";
+  const safeMessage = escapeHtml(message);
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <title>LinkedIn MCP – ${status}</title>
 <style>
@@ -125,8 +118,27 @@ function callbackPage(status: "success" | "error", message: string): string {
 <div class="card">
   <div class="icon">${icon}</div>
   <h1>${status === "success" ? "Connected!" : "Error"}</h1>
-  <p>${message}</p>
+  <p>${safeMessage}</p>
 </div></body></html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return char;
+    }
+  });
 }
 
 async function main() {
