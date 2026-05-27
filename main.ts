@@ -4,11 +4,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
-import { initializeToken, REDIRECT_URI, resolveOAuthCallback } from "./linkedin-api.js";
+import { exchangeCodeForToken, initializeToken, REDIRECT_URI, validateAndConsumeOAuthState } from "./linkedin-api.js";
 import { startCronJob } from "./cron.js";
 import { createServer } from "./server.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
+const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID ?? "";
+const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET ?? "";
+
 async function startHttpServer(factory: () => McpServer): Promise<void> {
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
@@ -43,14 +46,19 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
       return;
     }
 
-    // Validate state and notify any waiting tool call
-    const matched = resolveOAuthCallback(code, state);
-    if (!matched) {
-      res.status(400).send(callbackPage("error", "Invalid or expired OAuth state. Please start the LinkedIn connection again."));
+    const valid = await validateAndConsumeOAuthState(state);
+    if (!valid) {
+      res.status(400).send(callbackPage("error", "Invalid or expired OAuth state. Please call linkedin_connect again to start over."));
       return;
     }
 
-    res.send(callbackPage("success", "Authorization received. Return to your MCP host to finish connecting."));
+    try {
+      await exchangeCodeForToken(code, CLIENT_ID, CLIENT_SECRET);
+      res.send(callbackPage("success", "Connected! Return to your MCP client — you are now linked to LinkedIn."));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).send(callbackPage("error", `Token exchange failed: ${msg}`));
+    }
   });
 
   // MCP endpoint — stateless per-request

@@ -29,13 +29,15 @@ export interface LinkedInProfile {
   profilePicture?: string;
 }
 
+const OAUTH_STATE_FILE = path.join(os.homedir(), ".linkedin-mcp-oauth-state.json");
+
+interface OAuthStateRecord {
+  state: string;
+  expiresAt: number;
+}
+
 // Module-level singleton state — shared across per-request server instances
 let tokenData: TokenData | null = null;
-let latestOAuthState: string | null = null;
-const pendingOAuthResolves = new Map<
-  string,
-  { resolve: (code: string | null) => void; timeout: NodeJS.Timeout }
->();
 
 export async function initializeToken(): Promise<void> {
   try {
@@ -57,38 +59,29 @@ export function isAuthenticated(): boolean {
   return Date.now() < expiresAt;
 }
 
-export function generateAuthUrl(clientId: string): string {
-  latestOAuthState = crypto.randomBytes(16).toString("hex");
+export async function generateAuthUrl(clientId: string): Promise<string> {
+  const state = crypto.randomBytes(16).toString("hex");
+  const record: OAuthStateRecord = { state, expiresAt: Date.now() + OAUTH_STATE_TTL_MS };
+  await fs.writeFile(OAUTH_STATE_FILE, JSON.stringify(record), "utf-8");
   const params = new URLSearchParams({
     response_type: "code",
     client_id: clientId,
     redirect_uri: REDIRECT_URI,
-    state: latestOAuthState,
+    state,
     scope: "openid profile email w_member_social",
   });
   return `https://www.linkedin.com/oauth/v2/authorization?${params}`;
 }
 
-export function setPendingOAuthResolve(resolve: (code: string | null) => void): void {
-  if (!latestOAuthState) {
-    throw new Error("No OAuth state has been generated for this auth request.");
+export async function validateAndConsumeOAuthState(state: string): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(OAUTH_STATE_FILE, "utf-8");
+    const record = JSON.parse(raw) as OAuthStateRecord;
+    await fs.unlink(OAUTH_STATE_FILE).catch(() => {});
+    return record.state === state && Date.now() < record.expiresAt;
+  } catch {
+    return false;
   }
-  const state = latestOAuthState;
-  const timeout = setTimeout(() => {
-    pendingOAuthResolves.delete(state);
-    resolve(null);
-  }, OAUTH_STATE_TTL_MS);
-  timeout.unref();
-  pendingOAuthResolves.set(state, { resolve, timeout });
-}
-
-export function resolveOAuthCallback(code: string, state: string): boolean {
-  const pending = pendingOAuthResolves.get(state);
-  if (!pending) return false;
-  pendingOAuthResolves.delete(state);
-  clearTimeout(pending.timeout);
-  pending.resolve(code);
-  return true;
 }
 
 export async function exchangeCodeForToken(

@@ -12,14 +12,12 @@ import {
   createImagePost,
   createPost,
   deletePost,
-  exchangeCodeForToken,
   generateAuthUrl,
   getEmail,
   getProfile,
   isAuthenticated,
   REDIRECT_URI,
   revokeToken,
-  setPendingOAuthResolve,
   uploadImage,
 } from "./linkedin-api.js";
 import { generatePostText, generateRewrites, generateWeeklyPlan, getCronConfig } from "./cron.js";
@@ -91,35 +89,16 @@ export function createServer(): McpServer {
 
       if (!CLIENT_ID || !CLIENT_SECRET) return missingCredentialsResult();
 
-      const authUrl = generateAuthUrl(CLIENT_ID);
-
-      const code = await new Promise<string | null>((resolve) => {
-        setPendingOAuthResolve(resolve);
-      });
-
-      if (!code) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Please open this URL to authenticate with LinkedIn:\n\n${authUrl}\n\nAfter authenticating, call linkedin_connect again.`,
-            },
-          ],
-          structuredContent: { status: "pending", authUrl },
-        };
-      }
-
-      await exchangeCodeForToken(code, CLIENT_ID, CLIENT_SECRET);
-      const profile = await getProfile();
+      const authUrl = await generateAuthUrl(CLIENT_ID);
 
       return {
         content: [
           {
             type: "text",
-            text: `Connected to LinkedIn as ${profile.firstName} ${profile.lastName}!`,
+            text: `Open this URL in your browser to connect LinkedIn:\n\n${authUrl}\n\nAfter you authorize, call linkedin_connect again to confirm.`,
           },
         ],
-        structuredContent: { status: "connected", profile },
+        structuredContent: { status: "pending", authUrl },
       };
     }
   );
